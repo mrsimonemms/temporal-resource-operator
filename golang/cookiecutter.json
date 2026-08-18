@@ -1,0 +1,6 @@
+{
+  "project_name": null,
+  "description": "Barebones Golang starter project",
+  "author": "Simon Emms <simon@simonemms.com>",
+  "repo": "github.com/mrsimonemms/{{ cookiecutter.project_name | lower | replace(' ', '-') }}"
+}

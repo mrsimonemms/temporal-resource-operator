@@ -1,0 +1,10 @@
+{
+  "project_name": null,
+  "description": "JavaScript starter project",
+  "author": "Simon Emms <simon@simonemms.com>",
+  "type": [
+    "blank",
+    "nestjs",
+    "svelte"
+  ]
+}

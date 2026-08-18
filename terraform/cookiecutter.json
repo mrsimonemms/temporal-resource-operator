@@ -1,0 +1,6 @@
+{
+  "project_name": null,
+  "description": "A Terraform project with Terragrunt enabled",
+  "author": "Simon Emms <simon@simonemms.com>",
+  "module_name": null
+}

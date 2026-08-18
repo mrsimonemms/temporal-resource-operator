@@ -1,0 +1,13 @@
+{
+  "image": "ghcr.io/mrsimonemms/devcontainers/full",
+  "name": "devcontainer",
+  "features": {
+    "ghcr.io/devcontainers-extra/features/cookiecutter:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [],
+      "settings": {}
+    }
+  }
+}

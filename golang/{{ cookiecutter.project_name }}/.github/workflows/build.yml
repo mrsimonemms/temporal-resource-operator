@@ -1,0 +1,56 @@
+name: Build
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: '{{ "${{ secrets.GITHUB_TOKEN }}" }}'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # fetch-depth is required
+
+      - uses: wagoid/commitlint-github-action@v6
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # Required for pre-commit to be able scan history
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+
+      - name: Install dependencies
+        run: go install ./...
+
+      - name: go-vet
+        run: go vet -v ./...
+
+      - name: go-test
+        run: go test -v ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+
+      - uses: pre-commit/action@v3.0.1

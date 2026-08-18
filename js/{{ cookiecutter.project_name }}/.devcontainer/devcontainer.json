@@ -1,0 +1,28 @@
+{
+  "image": "ghcr.io/mrsimonemms/devcontainers/full",
+  "name": "devcontainer",
+  "features": {
+    {%- if cookiecutter.type == "nestjs" %}
+    "ghcr.io/devcontainers-extra/features/nestjs-cli:2": {}
+    {%- endif %}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        {%- if cookiecutter.type == "nestjs" %}
+        "cweijan.vscode-mysql-client2",
+        {%- endif %}
+        "esbenp.prettier-vscode"
+        {%- if cookiecutter.type == "svelte" %},
+        "svelte.svelte-vscode"
+        {%- endif %}
+      ],
+      "settings": {}
+    }
+  {%- if cookiecutter.type == "svelte" %}
+  },
+  "containerEnv": {
+    "VITE_HOST": "0.0.0.0"
+  {%- endif %}
+  }
+}

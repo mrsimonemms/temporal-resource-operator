@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/devcontainers-extra/features/cookiecutter:2": {
+      "version": "2.0.18",
+      "resolved": "ghcr.io/devcontainers-extra/features/cookiecutter@sha256:7d15df751e02909fa9fb48e94b3132d8e2aed3dbc8585186cc4b9260aed90ec3",
+      "integrity": "sha256:7d15df751e02909fa9fb48e94b3132d8e2aed3dbc8585186cc4b9260aed90ec3"
+    }
+  }
+}
