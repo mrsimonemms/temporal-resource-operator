@@ -1,0 +1,19 @@
+{
+  "template": "https://github.com/mrsimonemms/new",
+  "commit": "6f9d354501373017c05fcf905450cfb9647ff8bf",
+  "checkout": "main",
+  "context": {
+    "cookiecutter": {
+      "project_name": "temporal-resource-operator",
+      "description": "A Kubernetes operator for managing Temporal resources across Temporal Cloud and self-hosted",
+      "author": "Simon Emms <simon@simonemms.com>",
+      "repo": "github.com/mrsimonemms/temporal-resource-operator",
+      "_template": "https://github.com/mrsimonemms/new",
+      "_commit": "6f9d354501373017c05fcf905450cfb9647ff8bf"
+    }
+  },
+  "directory": "golang",
+  "skip": [
+    ".git"
+  ]
+}

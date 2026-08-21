@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/audacioustux/devcontainers/kubebuilder:1": {
+      "version": "1.0.0",
+      "resolved": "ghcr.io/audacioustux/devcontainers/kubebuilder@sha256:2373ebb3061aa4b70e36cc68671d76c312ca95c9628683cab4bee13fc5e8d47b",
+      "integrity": "sha256:2373ebb3061aa4b70e36cc68671d76c312ca95c9628683cab4bee13fc5e8d47b"
+    }
+  }
+}

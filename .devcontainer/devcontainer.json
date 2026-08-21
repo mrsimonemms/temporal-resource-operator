@@ -1,0 +1,16 @@
+{
+  "name": "devcontainer",
+  "image": "ghcr.io/mrsimonemms/devcontainers/full",
+  "features": {
+    "ghcr.io/audacioustux/devcontainers/kubebuilder:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [],
+      "settings": {}
+    }
+  },
+  "containerEnv": {
+    "GIT_REPO": "github.com/mrsimonemms/temporal-resource-operator"
+  }
+}
