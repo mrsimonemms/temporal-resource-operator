@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster
+  namespace: temporal
+spec:
+  selector:
+    app: temporal
+  ports:
+    - name: ui
+      port: 8233
+      targetPort: ui
+      protocol: TCP
+    - name: grpc
+      port: 7233
+      targetPort: grpc
+      protocol: TCP
