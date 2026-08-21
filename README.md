@@ -1,6 +1,7 @@
 # temporal-resource-operator
 
-A Kubernetes operator for managing Temporal resources across Temporal Cloud and self-hosted
+A Kubernetes operator for managing Temporal resources across Temporal Cloud and
+self-hosted
 
 <!-- toc -->
 

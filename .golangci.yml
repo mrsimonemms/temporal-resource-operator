@@ -64,6 +64,10 @@ linters:
       - linters:
           - funlen
         path: _test\.go
+      - linters:
+          - staticcheck
+        text: "ST1001"
+        path: test/
     paths:
       - third_party$
       - builtin$
