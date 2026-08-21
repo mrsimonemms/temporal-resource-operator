@@ -4,6 +4,11 @@
       "version": "1.0.0",
       "resolved": "ghcr.io/audacioustux/devcontainers/kubebuilder@sha256:2373ebb3061aa4b70e36cc68671d76c312ca95c9628683cab4bee13fc5e8d47b",
       "integrity": "sha256:2373ebb3061aa4b70e36cc68671d76c312ca95c9628683cab4bee13fc5e8d47b"
+    },
+    "ghcr.io/devcontainers-extra/features/kind:1": {
+      "version": "1.0.15",
+      "resolved": "ghcr.io/devcontainers-extra/features/kind@sha256:c28b5313388ed33e34637d411d7cd50e79b0b55f8c79f97b84d9ec20e7f6bcaa",
+      "integrity": "sha256:c28b5313388ed33e34637d411d7cd50e79b0b55f8c79f97b84d9ec20e7f6bcaa"
     }
   }
 }
