@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/temporal.simonemms.com_connections.yaml
+- bases/temporal.simonemms.com_namespaces.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

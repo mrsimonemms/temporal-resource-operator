@@ -300,7 +300,8 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
 
 			By("applying the Connection sample")
-			cmd = exec.Command("kubectl", "apply", "-k", "config/samples/", "-n", "default")
+			cmd = exec.Command("kubectl", "apply", "-n", "default",
+				"-f", "config/samples/temporal_v1alpha1_connection.yaml")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply the Connection sample")
 
@@ -351,7 +352,210 @@ spec:
 			Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
 		})
 	})
+
+	Context("Namespace", func() {
+		// A name unique to this run and this spec. Temporal deletes namespaces
+		// asynchronously, so reusing one across specs would let a leftover
+		// namespace satisfy a later spec; a fresh name also means the "namespace
+		// did not exist and was registered" path is genuinely exercised.
+		var temporalNamespace string
+
+		BeforeEach(func() {
+			temporalNamespace = fmt.Sprintf("e2e-ns-%d-%d",
+				GinkgoRandomSeed(), CurrentSpecReport().LineNumber())
+
+			By("removing any Connections and Namespaces left by an earlier spec")
+			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com,connection",
+				"--all", "-n", "default", "--wait=true")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to remove existing resources")
+
+			By("waiting for the Temporal Service to be available")
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Available",
+				"deployment/temporal", "-n", "temporal", "--timeout=5m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
+		})
+
+		AfterEach(func() {
+			By("removing the Kubernetes resources")
+			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com,connection",
+				"--all", "-n", "default", "--wait=true")
+			_, _ = utils.Run(cmd)
+
+			// The operator deliberately leaves Temporal namespaces behind, so
+			// remove this one here to keep a reused cluster predictable.
+			By("removing the Temporal namespace")
+			_, _ = utils.Run(temporalCLI("operator", "namespace", "delete", "-n", temporalNamespace, "--yes"))
+		})
+
+		It("should register the Temporal namespace and report Ready=True", func() {
+			By("applying a ready Connection")
+			applyConnectionSample()
+
+			By("applying a Namespace")
+			applyNamespace(temporalNamespace, "36h")
+
+			By("waiting for the Namespace to report Ready=True with reason Created")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceField(temporalNamespace, "{.status.observedGeneration}")).
+					To(Equal(namespaceField(temporalNamespace, "{.metadata.generation}")))
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("confirming the namespace exists on the Temporal Service")
+			described := describeTemporalNamespace(temporalNamespace)
+			Expect(described.NamespaceInfo.Name).To(Equal(temporalNamespace))
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal("129600s"), "36h of retention")
+
+			By("recreating the Namespace and confirming the existing namespace is adopted")
+			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com",
+				temporalNamespace, "-n", "default", "--wait=true")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Namespace")
+
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Reconciled"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should default retention to 72h", func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			described := describeTemporalNamespace(temporalNamespace)
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal("259200s"), "72h of retention")
+		})
+
+		It("should report ConnectionNotFound when the Connection does not exist", func() {
+			applyNamespace(temporalNamespace, "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("ConnectionNotFound"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("confirming no Temporal namespace was registered")
+			_, err := utils.Run(temporalCLI("operator", "namespace", "describe", "-n", temporalNamespace))
+			Expect(err).To(HaveOccurred(), "The Temporal namespace should not exist")
+		})
+
+		It("should reject a Namespace without a connectionRef name", func() {
+			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+kind: Namespace
+metadata:
+  name: namespace-invalid
+spec:
+  connectionRef: {}
+`)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "The CRD should reject an empty connectionRef")
+			Expect(err.Error()).To(ContainSubstring("connectionRef.name is required"))
+		})
+	})
 })
+
+// applyConnectionSample applies the sample Connection and waits for it to become
+// Ready, so that Namespace specs start from a satisfied dependency.
+func applyConnectionSample() {
+	cmd := exec.Command("kubectl", "apply", "-n", "default",
+		"-f", "config/samples/temporal_v1alpha1_connection.yaml")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Connection sample")
+
+	Eventually(func(g Gomega) {
+		g.Expect(connectionReady("connection-sample")).To(Equal("True"))
+	}, 3*time.Minute).Should(Succeed())
+}
+
+// applyNamespace applies a Namespace referencing the sample Connection. An empty
+// retention leaves the field out, so the CRD default applies.
+func applyNamespace(name, retention string) {
+	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+kind: Namespace
+metadata:
+  name: ` + name + `
+spec:
+  connectionRef:
+    name: connection-sample
+`
+	if retention != "" {
+		manifest += "  retention: " + retention + "\n"
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Namespace")
+}
+
+// temporalNamespaceDescription is the part of `temporal operator namespace
+// describe -o json` output the e2e specs assert on.
+type temporalNamespaceDescription struct {
+	NamespaceInfo struct {
+		Name  string `json:"name"`
+		State string `json:"state"`
+	} `json:"namespaceInfo"`
+	Config struct {
+		WorkflowExecutionRetentionTTL string `json:"workflowExecutionRetentionTtl"`
+	} `json:"config"`
+}
+
+// describeTemporalNamespace asks the Temporal Service itself about a namespace.
+func describeTemporalNamespace(name string) temporalNamespaceDescription {
+	output, err := utils.Run(temporalCLI("operator", "namespace", "describe", "-o", "json", "-n", name))
+	Expect(err).NotTo(HaveOccurred(), "Failed to describe the Temporal namespace")
+
+	var described temporalNamespaceDescription
+	Expect(json.Unmarshal([]byte(output), &described)).To(Succeed(), "Failed to parse the description")
+
+	return described
+}
+
+// temporalCLI builds a kubectl exec running the Temporal CLI inside the Temporal
+// deployment, so no extra tooling is needed on the test host.
+func temporalCLI(args ...string) *exec.Cmd {
+	full := append([]string{"exec", "-n", "temporal", "deploy/temporal", "--", "temporal"}, args...)
+
+	return exec.Command("kubectl", full...)
+}
+
+// namespaceReady returns the status of the named Namespace's Ready condition.
+func namespaceReady(name string) string {
+	return namespaceReadyField(name, "status")
+}
+
+// namespaceReadyReason returns the reason on the named Namespace's Ready condition.
+func namespaceReadyReason(name string) string {
+	return namespaceReadyField(name, "reason")
+}
+
+// namespaceReadyField reads a single field from the named Namespace's Ready condition.
+func namespaceReadyField(name, field string) string {
+	return namespaceField(name, fmt.Sprintf("{.status.conditions[?(@.type=='Ready')].%s}", field))
+}
+
+// namespaceField reads a jsonpath expression from the named Namespace.
+func namespaceField(name, jsonPath string) string {
+	cmd := exec.Command("kubectl", "get", "namespace.temporal.simonemms.com", name,
+		"-n", "default", "-o", "jsonpath="+jsonPath)
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the Namespace")
+
+	return output
+}
 
 // connectionReady returns the status of the named Connection's Ready condition.
 func connectionReady(name string) string {
