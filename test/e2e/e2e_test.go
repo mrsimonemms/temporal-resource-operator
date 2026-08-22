@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -272,18 +273,110 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("Connection", func() {
+		// The Temporal dev server installed by `make install-dependencies`.
+		const temporalAddress = "cluster.temporal.svc.cluster.local:7233"
+
+		// Start every spec from a clean slate, so a leftover Connection cannot
+		// make a spec pass against a status it did not produce.
+		BeforeEach(func() {
+			cmd := exec.Command("kubectl", "delete", "connection", "--all", "-n", "default", "--wait=true")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to remove existing Connections")
+		})
+
+		AfterEach(func() {
+			cmd := exec.Command("kubectl", "delete", "connection", "--all", "-n", "default")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should become Ready against the Temporal Service", func() {
+			By("waiting for the Temporal Service to be available")
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Available",
+				"deployment/temporal", "-n", "temporal", "--timeout=5m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
+
+			By("applying the Connection sample")
+			cmd = exec.Command("kubectl", "apply", "-k", "config/samples/", "-n", "default")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply the Connection sample")
+
+			By("waiting for the Connection to report Ready=True")
+			Eventually(func(g Gomega) {
+				g.Expect(connectionField("connection-sample", "{.status.observedGeneration}")).
+					To(Equal(connectionField("connection-sample", "{.metadata.generation}")))
+				g.Expect(connectionReady("connection-sample")).To(Equal("True"))
+				g.Expect(connectionReadyReason("connection-sample")).To(Equal("Connected"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should report Ready=False for an unreachable Temporal Service", func() {
+			By("creating a Connection pointing at nothing")
+			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+kind: Connection
+metadata:
+  name: connection-unreachable
+spec:
+  address: does-not-exist.temporal.svc.cluster.local:7233
+`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the Connection")
+
+			By("waiting for the Connection to report Ready=False")
+			Eventually(func(g Gomega) {
+				g.Expect(connectionReady("connection-unreachable")).To(Equal("False"))
+				g.Expect(connectionReadyReason("connection-unreachable")).To(Equal("ConnectionFailed"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should reject a Connection with both credential sources", func() {
+			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+kind: Connection
+metadata:
+  name: connection-invalid
+spec:
+  address: ` + temporalAddress + `
+  credentials:
+    apiKey: some-key
+  credentialsSecretRef:
+    name: some-secret
+`)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "The CRD should reject conflicting credentials")
+			Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+		})
 	})
 })
+
+// connectionReady returns the status of the named Connection's Ready condition.
+func connectionReady(name string) string {
+	return connectionReadyField(name, "status")
+}
+
+// connectionReadyReason returns the reason on the named Connection's Ready condition.
+func connectionReadyReason(name string) string {
+	return connectionReadyField(name, "reason")
+}
+
+// connectionReadyField reads a single field from the named Connection's Ready condition.
+func connectionReadyField(name, field string) string {
+	return connectionField(name, fmt.Sprintf("{.status.conditions[?(@.type=='Ready')].%s}", field))
+}
+
+// connectionField reads a jsonpath expression from the named Connection.
+func connectionField(name, jsonPath string) string {
+	cmd := exec.Command("kubectl", "get", "connection", name, "-n", "default", "-o", "jsonpath="+jsonPath)
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the Connection")
+
+	return output
+}
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request

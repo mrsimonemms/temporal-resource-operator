@@ -1,0 +1,16 @@
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: Connection
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: kustomize
+  name: connection-sample
+spec:
+  # The Temporal dev server deployed by `make install-dependencies`
+  address: cluster.temporal.svc.cluster.local:7233
+  # Temporal Cloud would look more like this:
+  #
+  # address: my-namespace.a1b2c.tmprl.cloud:7233
+  # tls: true
+  # credentialsSecretRef:
+  #   name: temporal-credentials

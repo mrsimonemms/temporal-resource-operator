@@ -18,9 +18,13 @@ package temporal
 
 import (
 	"context"
+	"errors"
 
 	"go.temporal.io/sdk/client"
 )
+
+// ErrNoOptions is returned when a client is created without any dial options.
+var ErrNoOptions = errors.New("no client options given")
 
 type Client struct {
 	client client.Client
@@ -36,6 +40,10 @@ func (c *Client) Close() {
 }
 
 func New(ctx context.Context, opts *client.Options) (*Client, error) {
+	if opts == nil {
+		return nil, ErrNoOptions
+	}
+
 	temporalClient, err := client.DialContext(ctx, *opts)
 	if err != nil {
 		return nil, err
