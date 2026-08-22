@@ -1,0 +1,12 @@
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: kustomize
+  # The resource name is the Temporal namespace name
+  name: namespace-sample
+spec:
+  connectionRef:
+    name: connection-sample
+  retention: 72h
