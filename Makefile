@@ -285,3 +285,14 @@ endif
 .PHONY: install-dependencies
 install-dependencies:
 	kubectl apply -k config/dependencies/
+
+.PHONY: kind-load
+kind-load:
+	kind load docker-image $(IMG) --name $(KIND_CLUSTER)
+
+.PHONY: install-samples
+install-samples:
+	kubectl apply -k ./config/samples
+
+.PHONY: apply
+apply: manifests generate install docker-build kind-load deploy install-samples
