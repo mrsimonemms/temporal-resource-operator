@@ -46,6 +46,16 @@ const metricsServiceName = "app-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "app-metrics-binding"
 
+// controllerDeploymentName is the Deployment running the manager, in the
+// namespace above.
+const controllerDeploymentName = "app-controller-manager"
+
+// ownerMarkerKey mirrors the Temporal namespace metadata key the controller
+// stamps on namespaces it registers. It is spelled out here rather than
+// imported, because it is the externally visible contract these specs exist to
+// pin down.
+const ownerMarkerKey = "temporal.simonemms.com/owner-uid"
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -365,35 +375,33 @@ spec:
 				GinkgoRandomSeed(), CurrentSpecReport().LineNumber())
 
 			By("removing any Connections and Namespaces left by an earlier spec")
-			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com,connection",
-				"--all", "-n", "default", "--wait=true")
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to remove existing resources")
+			clearOperatorResources()
 
 			By("waiting for the Temporal Service to be available")
-			cmd = exec.Command("kubectl", "wait", "--for=condition=Available",
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Available",
 				"deployment/temporal", "-n", "temporal", "--timeout=5m")
-			_, err = utils.Run(cmd)
+			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
 		})
 
 		AfterEach(func() {
 			By("removing the Kubernetes resources")
-			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com,connection",
-				"--all", "-n", "default", "--wait=true")
-			_, _ = utils.Run(cmd)
+			clearOperatorResources()
 
-			// The operator deliberately leaves Temporal namespaces behind, so
-			// remove this one here to keep a reused cluster predictable.
+			// Adopted and orphaned namespaces are deliberately left behind by
+			// the operator, so remove this one here to keep a reused cluster
+			// predictable. Namespaces the operator owned are already gone, and
+			// asking again is a harmless no-op.
 			By("removing the Temporal namespace")
-			_, _ = utils.Run(temporalCLI("operator", "namespace", "delete", "-n", temporalNamespace, "--yes"))
+			removeTemporalNamespace(temporalNamespace)
 		})
 
-		It("should register the Temporal namespace and report Ready=True", func() {
+		It("should own the lifecycle of a namespace it creates", func() {
 			By("applying a ready Connection")
 			applyConnectionSample()
 
-			By("applying a Namespace")
+			By("applying a Namespace for a Temporal namespace that does not exist")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeFalse())
 			applyNamespace(temporalNamespace, "36h")
 
 			By("waiting for the Namespace to report Ready=True with reason Created")
@@ -404,23 +412,259 @@ spec:
 				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
 			}, 3*time.Minute).Should(Succeed())
 
+			By("confirming ownership was recorded as Created")
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"))
+
 			By("confirming the namespace exists on the Temporal Service")
 			described := describeTemporalNamespace(temporalNamespace)
 			Expect(described.NamespaceInfo.Name).To(Equal(temporalNamespace))
-			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal("129600s"), "36h of retention")
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal(retentionSeconds(36)))
 
-			By("recreating the Namespace and confirming the existing namespace is adopted")
-			cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com",
-				temporalNamespace, "-n", "default", "--wait=true")
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Namespace")
+			By("confirming Temporal carries the Kubernetes UID as the ownership marker")
+			uid := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(uid).NotTo(BeEmpty())
+			Expect(described.NamespaceInfo.Data).To(HaveKeyWithValue(ownerMarkerKey, uid))
 
+			By("confirming the finalizer is holding the resource")
+			Expect(namespaceField(temporalNamespace, "{.metadata.finalizers}")).
+				To(ContainSubstring("temporal.simonemms.com/namespace"))
+
+			By("deleting the Namespace")
+			deleteNamespace(temporalNamespace)
+
+			By("confirming the Temporal namespace was deleted with it")
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNamespaceExists(temporalNamespace)).To(BeFalse())
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should manage but not own a namespace it adopts", func() {
+			By("creating the Temporal namespace outside the operator")
+			createTemporalNamespace(temporalNamespace, "36h")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+
+			By("applying a ready Connection")
+			applyConnectionSample()
+
+			By("applying a matching Namespace")
 			applyNamespace(temporalNamespace, "36h")
+
+			By("waiting for the Namespace to report Ready=True with reason Adopted")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Adopted"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Adopted"))
+
+			By("confirming the operator did not claim it")
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				NotTo(HaveKey(ownerMarkerKey), "adopting a namespace must not stamp ownership on it")
+
+			By("changing the retention on the Namespace")
+			applyNamespace(temporalNamespace, "48h")
+
+			By("confirming the Temporal retention follows, without changing ownership")
+			Eventually(func(g Gomega) {
+				g.Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+					To(Equal(retentionSeconds(48)))
+			}, 3*time.Minute).Should(Succeed())
 
 			Eventually(func(g Gomega) {
 				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
-				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Reconciled"))
 			}, 3*time.Minute).Should(Succeed())
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Adopted"),
+				"managing an adopted namespace must not make the operator its owner")
+
+			By("deleting the Namespace")
+			deleteNamespace(temporalNamespace)
+
+			By("confirming the Temporal namespace survived, still unmarked")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).NotTo(HaveKey(ownerMarkerKey))
+		})
+
+		It("should refuse a namespace carrying another owner's marker", func() {
+			const foreignUID = "deadbeef-0000-1111-2222-333344445555"
+
+			By("creating a Temporal namespace owned by something else")
+			createTemporalNamespaceOwnedBy(temporalNamespace, "36h", foreignUID)
+
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "96h")
+
+			By("waiting for the Namespace to report an ownership conflict")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("OwnershipConflict"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("confirming ownership was never established")
+			Expect(namespaceOwnership(temporalNamespace)).To(BeEmpty(),
+				"a conflicting namespace is neither created nor adopted")
+
+			By("confirming Temporal was left exactly as it was")
+			described := describeTemporalNamespace(temporalNamespace)
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal(retentionSeconds(36)),
+				"a conflict must outrank retention drift")
+			Expect(described.NamespaceInfo.Data).To(HaveKeyWithValue(ownerMarkerKey, foreignUID),
+				"another owner's marker must not be overwritten")
+		})
+
+		It("should not let a recreated resource inherit the previous one's namespace", func() {
+			applyConnectionSample()
+
+			By("creating the namespace through a first Namespace resource")
+			applyNamespace(temporalNamespace, "36h")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			uidA := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uidA))
+
+			// Taking the resource away has to happen with the operator stopped.
+			// Deleting it while the operator is running is a race the operator
+			// usually wins: the deletion timestamp wakes it up, it finalises the
+			// namespace it legitimately owns, and there is nothing left for the
+			// replacement to conflict with.
+			By("stopping the operator so it cannot finalise the namespace")
+			stopControllerManager()
+
+			By("removing the first resource, leaving the Temporal namespace behind")
+			removeNamespaceFinalizer(temporalNamespace)
+			deleteNamespace(temporalNamespace)
+
+			By("confirming the Temporal namespace outlived its resource")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uidA))
+
+			By("restarting the operator")
+			startControllerManager()
+
+			By("applying a replacement resource with the same name")
+			applyNamespace(temporalNamespace, "36h")
+
+			uidB := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(uidB).NotTo(Equal(uidA), "a recreated resource must have a fresh identity")
+
+			By("confirming the replacement reports a conflict rather than taking over")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("OwnershipConflict"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(namespaceOwnership(temporalNamespace)).To(BeEmpty())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uidA), "the original owner's claim stands")
+
+			// A normal delete here, with the operator running: the replacement
+			// never established ownership, so the operator must release the
+			// finalizer on its own without touching Temporal.
+			By("confirming the replacement cannot delete it either")
+			deleteNamespace(temporalNamespace)
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uidA))
+		})
+
+		It("should leave the Temporal namespace behind when the policy is Orphan", func() {
+			applyConnectionSample()
+
+			By("creating a namespace the operator owns but is told not to delete")
+			applyNamespaceWithPolicy(temporalNamespace, "36h", "Orphan")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"))
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			uid := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uid))
+
+			By("deleting the Namespace")
+			deleteNamespace(temporalNamespace)
+
+			By("confirming the Temporal namespace and its marker survived")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uid), "orphaning must not disturb the marker")
+		})
+
+		It("should release a deletion blocked on a missing Connection once orphaned", func() {
+			applyConnectionSample()
+
+			By("creating a namespace the operator owns under the default Delete policy")
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"))
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			uid := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+
+			By("deleting the Connection the operator would need to finalise")
+			cmd := exec.Command("kubectl", "delete", "connection", "connection-sample",
+				"-n", "default", "--wait=true")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Connection")
+
+			By("asking for the Namespace to be deleted")
+			beginNamespaceDeletion(temporalNamespace)
+
+			By("confirming the deletion is held open rather than orphaning silently")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("ConnectionNotFound"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(namespaceField(temporalNamespace, "{.metadata.deletionTimestamp}")).NotTo(BeEmpty())
+			Expect(namespaceField(temporalNamespace, "{.metadata.finalizers}")).
+				To(ContainSubstring("temporal.simonemms.com/namespace"))
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+
+			By("switching the terminating resource to Orphan")
+			setNamespaceDeletionPolicy(temporalNamespace, "Orphan")
+
+			By("confirming the resource is released")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceGone(temporalNamespace)).To(BeTrue())
+			}, 3*time.Minute).Should(Succeed())
+
+			By("confirming the Temporal namespace was deliberately left behind")
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
+				To(HaveKeyWithValue(ownerMarkerKey, uid))
+		})
+
+		It("should correct retention drift on a namespace it created", func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+			Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+				To(Equal(retentionSeconds(36)))
+
+			By("changing spec.retention")
+			applyNamespace(temporalNamespace, "96h")
+
+			By("confirming Temporal follows and the resource reports Updated")
+			Eventually(func(g Gomega) {
+				g.Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+					To(Equal(retentionSeconds(96)))
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Updated"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"),
+				"correcting drift must not change who owns the namespace")
 		})
 
 		It("should default retention to 72h", func() {
@@ -433,7 +677,7 @@ spec:
 			}, 3*time.Minute).Should(Succeed())
 
 			described := describeTemporalNamespace(temporalNamespace)
-			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal("259200s"), "72h of retention")
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal(retentionSeconds(72)))
 		})
 
 		It("should report ConnectionNotFound when the Connection does not exist", func() {
@@ -481,6 +725,12 @@ func applyConnectionSample() {
 // applyNamespace applies a Namespace referencing the sample Connection. An empty
 // retention leaves the field out, so the CRD default applies.
 func applyNamespace(name, retention string) {
+	applyNamespaceWithPolicy(name, retention, "")
+}
+
+// applyNamespaceWithPolicy is applyNamespace with an explicit deletion policy.
+// An empty policy leaves the field out, so the CRD default applies.
+func applyNamespaceWithPolicy(name, retention, deletionPolicy string) {
 	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
 kind: Namespace
 metadata:
@@ -493,6 +743,10 @@ spec:
 		manifest += "  retention: " + retention + "\n"
 	}
 
+	if deletionPolicy != "" {
+		manifest += "  deletionPolicy: " + deletionPolicy + "\n"
+	}
+
 	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 
@@ -500,12 +754,195 @@ spec:
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Namespace")
 }
 
+// setNamespaceDeletionPolicy patches the deletion policy on a Namespace. It is
+// used on a terminating resource, which the API server permits.
+func setNamespaceDeletionPolicy(name, deletionPolicy string) {
+	cmd := exec.Command("kubectl", "patch", "namespace.temporal.simonemms.com", name,
+		"-n", "default", "--type=merge",
+		"-p", `{"spec":{"deletionPolicy":"`+deletionPolicy+`"}}`)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to set the deletion policy")
+}
+
+// beginNamespaceDeletion asks for deletion without waiting, so a spec can look
+// at a resource the operator is refusing to let go of.
+func beginNamespaceDeletion(name string) {
+	cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com", name,
+		"-n", "default", "--wait=false")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to request deletion of the Namespace")
+}
+
+// namespaceGone reports whether the Namespace has left the API server.
+func namespaceGone(name string) bool {
+	cmd := exec.Command("kubectl", "get", "namespace.temporal.simonemms.com", name, "-n", "default")
+
+	_, err := utils.Run(cmd)
+
+	return err != nil
+}
+
+// deleteNamespace removes a Namespace resource and waits for the finalizer to
+// let it go.
+func deleteNamespace(name string) {
+	cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com", name,
+		"-n", "default", "--wait=true", "--timeout=3m")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to delete the Namespace")
+}
+
+// clearOperatorResources removes every Connection and Namespace from the test
+// namespace.
+//
+// Namespaces go first and are waited on: an owned Temporal namespace can only
+// be deleted while its Connection still exists. Anything still stuck afterwards
+// has its finalizer stripped, so one wedged resource cannot poison every
+// following spec - the specs themselves assert the finalizer behaviour.
+func clearOperatorResources() {
+	cmd := exec.Command("kubectl", "delete", "namespace.temporal.simonemms.com",
+		"--all", "-n", "default", "--wait=true", "--timeout=3m")
+	if _, err := utils.Run(cmd); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Namespace cleanup did not complete, stripping finalizers: %s\n", err)
+
+		cmd = exec.Command("kubectl", "patch", "namespace.temporal.simonemms.com", "--all",
+			"-n", "default", "--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+		_, _ = utils.Run(cmd)
+	}
+
+	cmd = exec.Command("kubectl", "delete", "connection", "--all", "-n", "default", "--wait=true")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to remove existing Connections")
+}
+
+// createTemporalNamespace registers a namespace directly on the Temporal
+// Service, standing in for one that pre-dates the operator.
+func createTemporalNamespace(name, retention string) {
+	_, err := utils.Run(temporalCLI("operator", "namespace", "create", "-n", name, "--retention", retention))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the Temporal namespace")
+}
+
+// createTemporalNamespaceOwnedBy registers a namespace already carrying an
+// ownership marker, standing in for one another Namespace resource owns.
+func createTemporalNamespaceOwnedBy(name, retention, uid string) {
+	_, err := utils.Run(temporalCLI("operator", "namespace", "create", "-n", name,
+		"--retention", retention, "--data", fmt.Sprintf("%s=%s", ownerMarkerKey, uid)))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the Temporal namespace")
+}
+
+// removeNamespaceFinalizer strips the operator's finalizer from a Namespace
+// resource, standing in for someone unpicking a stuck resource by hand.
+//
+// Only do this with the operator stopped. Removing the finalizer from a live
+// resource races whatever the operator is doing with it.
+func removeNamespaceFinalizer(name string) {
+	cmd := exec.Command("kubectl", "patch", "namespace.temporal.simonemms.com", name,
+		"-n", "default", "--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to remove the Namespace finalizer")
+}
+
+// stopControllerManager scales the manager to zero and waits until its pod has
+// actually gone, so a spec can rearrange resources with no reconciliation
+// happening at all.
+//
+// The manager is scaled back up when the spec ends, however it ends, so a spec
+// that fails part-way cannot leave the suite without an operator.
+func stopControllerManager() {
+	DeferCleanup(startControllerManager)
+
+	cmd := exec.Command("kubectl", "scale", "deployment", controllerDeploymentName,
+		"-n", namespace, "--replicas=0")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to scale the controller-manager down")
+
+	// Wait on the pod list, not on the Deployment's replica counts: those clear
+	// the instant the scale is accepted, while the manager is still running and
+	// still reconciling. The pod is the process.
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[*].metadata.name}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(BeEmpty(), "The controller-manager pod should have gone")
+	}, 3*time.Minute).Should(Succeed())
+}
+
+// startControllerManager returns the manager to its single replica and waits
+// for it to be Available again. It is safe to call when the manager is already
+// running.
+//
+// When it runs as a cleanup it can find the manager already gone: cleanup
+// registered in a spec runs after the ordered container's AfterAll, which
+// undeploys everything. There is nothing to restore in that case.
+func startControllerManager() {
+	if !controllerManagerDeployed() {
+		return
+	}
+
+	cmd := exec.Command("kubectl", "scale", "deployment", controllerDeploymentName,
+		"-n", namespace, "--replicas=1")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to scale the controller-manager up")
+
+	cmd = exec.Command("kubectl", "wait", "--for=condition=Available",
+		"deployment/"+controllerDeploymentName, "-n", namespace, "--timeout=3m")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "The controller-manager did not come back")
+}
+
+// controllerManagerDeployed reports whether the manager Deployment is still
+// there to be scaled.
+func controllerManagerDeployed() bool {
+	cmd := exec.Command("kubectl", "get", "deployment", controllerDeploymentName, "-n", namespace)
+
+	_, err := utils.Run(cmd)
+
+	return err == nil
+}
+
+// removeTemporalNamespace clears up a namespace that outlived its resource.
+//
+// One delete attempt is not enough: the Service answers describe from storage
+// but resolves deletes through a namespace registry that lags, so a namespace
+// registered moments earlier can be reported missing by the delete and then
+// carry on existing. Keep asking until it has really gone.
+func removeTemporalNamespace(name string) {
+	Eventually(func(g Gomega) {
+		if !temporalNamespaceExists(name) {
+			return
+		}
+
+		_, _ = utils.Run(temporalCLI("operator", "namespace", "delete", "-n", name, "--yes"))
+
+		g.Expect(temporalNamespaceExists(name)).To(BeFalse(), "The Temporal namespace should have gone")
+	}, 2*time.Minute).Should(Succeed())
+}
+
+// temporalNamespaceExists reports whether the Temporal Service still knows about
+// a namespace.
+func temporalNamespaceExists(name string) bool {
+	_, err := utils.Run(temporalCLI("operator", "namespace", "describe", "-o", "json", "-n", name))
+
+	return err == nil
+}
+
+// retentionSeconds renders a whole number of hours the way Temporal reports
+// retention in its JSON output.
+func retentionSeconds(hours int) string {
+	return fmt.Sprintf("%ds", hours*3600)
+}
+
 // temporalNamespaceDescription is the part of `temporal operator namespace
 // describe -o json` output the e2e specs assert on.
 type temporalNamespaceDescription struct {
 	NamespaceInfo struct {
-		Name  string `json:"name"`
-		State string `json:"state"`
+		Name  string            `json:"name"`
+		State string            `json:"state"`
+		Data  map[string]string `json:"data"`
 	} `json:"namespaceInfo"`
 	Config struct {
 		WorkflowExecutionRetentionTTL string `json:"workflowExecutionRetentionTtl"`
@@ -529,6 +966,11 @@ func temporalCLI(args ...string) *exec.Cmd {
 	full := append([]string{"exec", "-n", "temporal", "deploy/temporal", "--", "temporal"}, args...)
 
 	return exec.Command("kubectl", full...)
+}
+
+// namespaceOwnership returns the persisted ownership of the named Namespace.
+func namespaceOwnership(name string) string {
+	return namespaceField(name, "{.status.ownership}")
 }
 
 // namespaceReady returns the status of the named Namespace's Ready condition.

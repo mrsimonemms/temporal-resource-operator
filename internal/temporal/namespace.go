@@ -20,8 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
+	namespacepb "go.temporal.io/api/namespace/v1"
+	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -48,6 +51,10 @@ type Namespace struct {
 
 	// Retention is how long closed workflow executions are kept.
 	Retention time.Duration
+
+	// Data is the namespace's custom key/value metadata. It is always a copy,
+	// so callers cannot reach back into anything the SDK owns.
+	Data map[string]string
 }
 
 // DescribeNamespace looks up a single Temporal namespace by name.
@@ -64,22 +71,28 @@ func (c *Client) DescribeNamespace(ctx context.Context, name string) (*Namespace
 		Namespace: name,
 	})
 	if err != nil {
-		var notFound *serviceerror.NamespaceNotFound
-		if errors.As(err, &notFound) {
-			return nil, fmt.Errorf("%w: %w", ErrNamespaceNotFound, err)
-		}
-
-		return nil, fmt.Errorf("describing namespace %s: %w", name, err)
+		return nil, mapNamespaceError(fmt.Sprintf("describing namespace %s", name), err)
 	}
 
 	return &Namespace{
 		Name:      resp.GetNamespaceInfo().GetName(),
 		Retention: resp.GetConfig().GetWorkflowExecutionRetentionTtl().AsDuration(),
+		Data:      copyData(resp.GetNamespaceInfo().GetData()),
 	}, nil
 }
 
-// CreateNamespace registers a new Temporal namespace with the given retention.
-func (c *Client) CreateNamespace(ctx context.Context, name string, retention time.Duration) error {
+// CreateNamespace registers a new Temporal namespace with the given retention
+// and custom metadata.
+//
+// The metadata is part of the registration request, so a namespace can never
+// exist without whatever the caller wanted stamped on it - there is no window
+// between the namespace appearing and its data being written.
+func (c *Client) CreateNamespace(
+	ctx context.Context,
+	name string,
+	retention time.Duration,
+	data map[string]string,
+) error {
 	if name == "" {
 		return ErrNoNamespaceName
 	}
@@ -87,10 +100,76 @@ func (c *Client) CreateNamespace(ctx context.Context, name string, retention tim
 	_, err := c.client.WorkflowService().RegisterNamespace(ctx, &workflowservice.RegisterNamespaceRequest{
 		Namespace:                        name,
 		WorkflowExecutionRetentionPeriod: durationpb.New(retention),
+		Data:                             copyData(data),
 	})
 	if err != nil {
 		return fmt.Errorf("registering namespace %s: %w", name, err)
 	}
 
 	return nil
+}
+
+// UpdateNamespaceRetention sets the workflow execution retention on an existing
+// Temporal namespace, leaving every other setting untouched.
+func (c *Client) UpdateNamespaceRetention(ctx context.Context, name string, retention time.Duration) error {
+	if name == "" {
+		return ErrNoNamespaceName
+	}
+
+	// Only the fields set on Config are updated, so this does not disturb
+	// archival, search attribute aliases or anything else on the namespace.
+	_, err := c.client.WorkflowService().UpdateNamespace(ctx, &workflowservice.UpdateNamespaceRequest{
+		Namespace: name,
+		Config: &namespacepb.NamespaceConfig{
+			WorkflowExecutionRetentionTtl: durationpb.New(retention),
+		},
+	})
+	if err != nil {
+		return mapNamespaceError(fmt.Sprintf("updating namespace %s", name), err)
+	}
+
+	return nil
+}
+
+// DeleteNamespace removes a Temporal namespace. The Service deletes the
+// namespace record synchronously and reclaims its data in the background.
+//
+// A namespace that is already gone produces an error satisfying
+// errors.Is(err, ErrNamespaceNotFound), leaving it to the caller to decide
+// whether that counts as success.
+func (c *Client) DeleteNamespace(ctx context.Context, name string) error {
+	if name == "" {
+		return ErrNoNamespaceName
+	}
+
+	_, err := c.client.OperatorService().DeleteNamespace(ctx, &operatorservice.DeleteNamespaceRequest{
+		Namespace: name,
+	})
+	if err != nil {
+		return mapNamespaceError(fmt.Sprintf("deleting namespace %s", name), err)
+	}
+
+	return nil
+}
+
+// copyData returns a copy of a namespace's custom metadata, or nil when there
+// is none. Copying keeps SDK-owned and caller-owned maps from being shared.
+func copyData(data map[string]string) map[string]string {
+	if len(data) == 0 {
+		return nil
+	}
+
+	return maps.Clone(data)
+}
+
+// mapNamespaceError turns Temporal's "namespace not found" into the package's
+// own sentinel, keeping the original error in the chain so callers can still
+// report what the Service said. Everything else is wrapped with context.
+func mapNamespaceError(action string, err error) error {
+	var notFound *serviceerror.NamespaceNotFound
+	if errors.As(err, &notFound) {
+		return fmt.Errorf("%w: %w", ErrNamespaceNotFound, err)
+	}
+
+	return fmt.Errorf("%s: %w", action, err)
 }

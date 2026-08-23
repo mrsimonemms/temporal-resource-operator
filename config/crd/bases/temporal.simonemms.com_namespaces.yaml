@@ -11,6 +11,8 @@ spec:
     kind: Namespace
     listKind: NamespaceList
     plural: namespaces
+    shortNames:
+    - tns
     singular: namespace
   scope: Namespaced
   versions:
@@ -20,6 +22,9 @@ spec:
       type: string
     - jsonPath: .spec.retention
       name: Retention
+      type: string
+    - jsonPath: .status.ownership
+      name: Ownership
       type: string
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
       name: Ready
@@ -79,6 +84,27 @@ spec:
                 x-kubernetes-validations:
                 - message: connectionRef.name is required
                   rule: self.name != ''
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  deletionPolicy decides what happens to the Temporal namespace when this
+                  resource is deleted. Defaults to Delete.
+
+                  Delete removes the Temporal namespace along with the resource, where the
+                  operator owns it and can prove so from Temporal's own metadata. That
+                  needs a working Connection, so deletion waits rather than orphaning a
+                  namespace it is responsible for.
+
+                  Orphan leaves the Temporal namespace behind and contacts Temporal not at
+                  all, which is how a resource is released when the Connection it would
+                  have needed no longer exists.
+
+                  This may be changed while the resource is being deleted, which is the
+                  supported way out of a deletion blocked on a missing Connection.
+                enum:
+                - Delete
+                - Orphan
+                type: string
               retention:
                 default: 72h
                 description: |-
@@ -166,6 +192,19 @@ spec:
                   last reconciled.
                 format: int64
                 type: integer
+              ownership:
+                description: |-
+                  ownership records whether the operator created the Temporal namespace or
+                  adopted one that already existed, and therefore whether deleting this
+                  resource deletes the Temporal namespace.
+
+                  "Creating" is a transient marker written immediately before registering a
+                  namespace; it settles to "Created" once registration is confirmed.
+                enum:
+                - Creating
+                - Created
+                - Adopted
+                type: string
             type: object
         required:
         - spec

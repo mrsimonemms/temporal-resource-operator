@@ -14,7 +14,6 @@ rules:
   - temporal.simonemms.com
   resources:
   - connections
-  - namespaces
   verbs:
   - get
   - list
@@ -27,4 +26,20 @@ rules:
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - temporal.simonemms.com
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - temporal.simonemms.com
+  resources:
+  - namespaces/finalizers
+  verbs:
   - update
