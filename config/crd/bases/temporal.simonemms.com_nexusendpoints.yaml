@@ -4,27 +4,27 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: searchattributes.temporal.simonemms.com
+  name: nexusendpoints.temporal.simonemms.com
 spec:
   group: temporal.simonemms.com
   names:
-    kind: SearchAttribute
-    listKind: SearchAttributeList
-    plural: searchattributes
+    kind: NexusEndpoint
+    listKind: NexusEndpointList
+    plural: nexusendpoints
     shortNames:
-    - tsa
-    singular: searchattribute
+    - tnx
+    singular: nexusendpoint
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.name
-      name: Attribute
-      type: string
-    - jsonPath: .spec.type
-      name: Type
+      name: Endpoint
       type: string
     - jsonPath: .spec.namespaceRef.name
       name: Temporal NS
+      type: string
+    - jsonPath: .spec.taskQueue
+      name: Task Queue
       type: string
     - jsonPath: .status.ownership
       name: Ownership
@@ -42,13 +42,15 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          SearchAttribute is the Schema for the searchattributes API.
+          NexusEndpoint is the Schema for the nexusendpoints API.
 
-          One resource manages exactly one Temporal search attribute. Which one is
+          One resource manages exactly one Temporal Nexus endpoint. Which one is
           spec.name; metadata.name is Kubernetes identity and is never sent to
-          Temporal. The two are separate because Kubernetes only accepts lowercase
-          names for a resource, and that is not something a CRD can relax, whereas
-          search attributes are conventionally PascalCase.
+          Temporal.
+
+          Nexus endpoints belong to the Service rather than to a namespace - the
+          namespace in the spec is where requests are routed, not where the endpoint
+          lives.
         properties:
           apiVersion:
             description: |-
@@ -68,12 +70,12 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of SearchAttribute
+            description: spec defines the desired state of NexusEndpoint
             properties:
               connectionRef:
                 description: |-
                   connectionRef references the Connection, in the same Kubernetes
-                  namespace, describing the Temporal Service holding this search attribute.
+                  namespace, describing the Temporal Service holding this endpoint.
                 properties:
                   name:
                     default: ""
@@ -94,13 +96,13 @@ spec:
               deletionPolicy:
                 default: Delete
                 description: |-
-                  deletionPolicy decides what happens to the Temporal search attribute when
+                  deletionPolicy decides what happens to the Temporal Nexus endpoint when
                   this resource is deleted. Defaults to Delete.
 
-                  Delete removes the search attribute along with the resource, where the
-                  operator created it. Orphan leaves it behind and contacts Temporal not at
-                  all, which is how a resource is released when the Connection it would
-                  have needed no longer exists.
+                  Delete removes the endpoint along with the resource, where the operator
+                  created it. Orphan leaves it behind and contacts Temporal not at all,
+                  which is how a resource is released when the Connection it would have
+                  needed no longer exists.
 
                   This may be changed while the resource is being deleted, which is the
                   supported way out of a deletion blocked on a missing Connection.
@@ -110,13 +112,12 @@ spec:
                 type: string
               name:
                 description: |-
-                  name is the Temporal search attribute's name, exactly as Temporal knows
-                  it - "CustomerId", not "customer-id".
+                  name is the Temporal Nexus endpoint's name, exactly as Temporal knows it.
+                  Endpoint names are unique across the whole Service, not per namespace.
 
                   This is separate from the resource's own metadata.name because Kubernetes
-                  only accepts lowercase names for a resource, while search attributes are
-                  conventionally PascalCase. Nothing is derived from metadata.name: what is
-                  written here is what Temporal is asked for, casing and all.
+                  only accepts lowercase names for a resource, while endpoint names are
+                  conventionally PascalCase. Nothing is derived from metadata.name.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
@@ -125,10 +126,15 @@ spec:
               namespaceRef:
                 description: |-
                   namespaceRef references the Namespace, in the same Kubernetes namespace,
-                  whose Temporal namespace holds this search attribute.
+                  whose Temporal namespace this endpoint routes requests to.
 
                   A Namespace's own metadata.name is its Temporal namespace name, so this
-                  is also the Temporal namespace the attribute lives in.
+                  is also the Temporal namespace in the endpoint's target. Temporal refuses
+                  to register an endpoint whose target namespace does not exist, which is
+                  why the Namespace has to be Ready before the endpoint is created.
+
+                  This is part of the endpoint's target rather than its identity, so it can
+                  be changed: the operator updates the endpoint in place.
                 properties:
                   name:
                     default: ""
@@ -144,43 +150,28 @@ spec:
                 x-kubernetes-validations:
                 - message: namespaceRef.name is required
                   rule: self.name != ''
-                - message: namespaceRef.name is immutable
-                  rule: self.name == oldSelf.name
-              type:
+              taskQueue:
                 description: |-
-                  type is the type of the values this search attribute holds.
-
-                  Temporal has no way to retype an existing search attribute - it accepts
-                  the request and silently keeps the original type - so a change here could
-                  never be carried out.
-                enum:
-                - Bool
-                - Datetime
-                - Double
-                - Int
-                - Keyword
-                - KeywordList
-                - Text
+                  taskQueue is the Nexus task queue in the target namespace that requests
+                  are routed to. Like the target namespace, it can be changed in place.
+                minLength: 1
                 type: string
-                x-kubernetes-validations:
-                - message: type is immutable
-                  rule: self == oldSelf
             required:
             - connectionRef
             - name
             - namespaceRef
-            - type
+            - taskQueue
             type: object
           status:
-            description: status defines the observed state of SearchAttribute
+            description: status defines the observed state of NexusEndpoint
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the SearchAttribute resource.
+                  conditions represent the current state of the NexusEndpoint resource.
 
                   Known condition types:
-                  - "Ready": the search attribute exists on the referenced Temporal
-                    namespace with the requested type
+                  - "Ready": the endpoint exists on the referenced Service and its target
+                    matches the spec
 
                   The status of each condition is one of True, False, or Unknown.
                 items:
@@ -241,20 +232,29 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              endpointId:
+                description: |-
+                  endpointId is the server-assigned ID of the endpoint, recorded as an
+                  observation to make the resource easier to correlate with Temporal.
+
+                  It is not proof of ownership: anyone can read it, and it says nothing
+                  about who created the endpoint. The operator always re-reads the endpoint
+                  before changing it rather than trusting what is recorded here.
+                type: string
               observedGeneration:
                 description: |-
-                  observedGeneration is the metadata.generation of the SearchAttribute that
+                  observedGeneration is the metadata.generation of the NexusEndpoint that
                   was last reconciled.
                 format: int64
                 type: integer
               ownership:
                 description: |-
-                  ownership records whether the operator registered the Temporal search
-                  attribute or adopted one that already existed, and therefore whether
-                  deleting this resource removes it.
+                  ownership records whether the operator created the Temporal endpoint or
+                  adopted one that already existed, and therefore whether deleting this
+                  resource removes it.
 
-                  "Creating" is a transient marker written immediately before registering
-                  an attribute; it settles to "Created" once registration is confirmed.
+                  "Creating" is a transient marker written immediately before creating an
+                  endpoint; it settles to "Created" once creation is confirmed.
                 enum:
                 - Creating
                 - Created

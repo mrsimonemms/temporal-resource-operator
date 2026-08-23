@@ -2,7 +2,7 @@ apiVersion: temporal.simonemms.com/v1alpha1
 kind: Connection
 metadata:
   labels:
-    app.kubernetes.io/name: app
+    app.kubernetes.io/name: temporal-resource-operator
     app.kubernetes.io/managed-by: kustomize
   name: connection-sample
 spec:

@@ -8,7 +8,7 @@ apiVersion: temporal.simonemms.com/v1alpha1
 kind: SearchAttribute
 metadata:
   labels:
-    app.kubernetes.io/name: app
+    app.kubernetes.io/name: temporal-resource-operator
     app.kubernetes.io/managed-by: kustomize
   name: customer-id
 spec:
@@ -28,7 +28,7 @@ apiVersion: temporal.simonemms.com/v1alpha1
 kind: SearchAttribute
 metadata:
   labels:
-    app.kubernetes.io/name: app
+    app.kubernetes.io/name: temporal-resource-operator
     app.kubernetes.io/managed-by: kustomize
   name: order-status
 spec:

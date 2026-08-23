@@ -11,17 +11,17 @@ metadata:
   labels:
     app.kubernetes.io/name: temporal-resource-operator
     app.kubernetes.io/managed-by: kustomize
-  name: searchattribute-admin-role
+  name: nexusendpoint-admin-role
 rules:
 - apiGroups:
   - temporal.simonemms.com
   resources:
-  - searchattributes
+  - nexusendpoints
   verbs:
   - '*'
 - apiGroups:
   - temporal.simonemms.com
   resources:
-  - searchattributes/status
+  - nexusendpoints/status
   verbs:
   - get

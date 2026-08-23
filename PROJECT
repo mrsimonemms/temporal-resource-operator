@@ -6,7 +6,7 @@ cliVersion: 4.15.0
 domain: simonemms.com
 layout:
 - go.kubebuilder.io/v4
-projectName: app
+projectName: temporal-resource-operator
 repo: github.com/mrsimonemms/temporal-resource-operator
 resources:
 - api:
@@ -34,6 +34,15 @@ resources:
   domain: simonemms.com
   group: temporal
   kind: SearchAttribute
+  path: github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: simonemms.com
+  group: temporal
+  kind: NexusEndpoint
   path: github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1
   version: v1alpha1
 version: "3"
