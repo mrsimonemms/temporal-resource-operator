@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	sdkclient "go.temporal.io/sdk/client"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -100,6 +99,8 @@ type SearchAttributeReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
+//
+//nolint:dupl // parallel with the sibling controllers on purpose; see dependency.go
 func (r *SearchAttributeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -404,7 +405,7 @@ func (r *SearchAttributeReconciler) deleteSearchAttribute(
 	// Deletion needs a working Connection. Readiness is deliberately not
 	// required: it is a cached judgement that may be stale, and giving up on an
 	// attribute this resource owns because of a stale status would orphan it.
-	conn, reason, err := r.getConnection(ctx, attribute.Spec.ConnectionRef, attribute.Namespace)
+	conn, reason, err := getConnection(ctx, r.Client, attribute.Spec.ConnectionRef.Name, attribute.Namespace)
 	if err != nil {
 		return reason, err
 	}
@@ -451,11 +452,13 @@ func (r *SearchAttributeReconciler) deleteSearchAttribute(
 //
 // The Namespace gate is what stops the operator registering an attribute on a
 // Temporal namespace that does not exist yet.
+//
+//nolint:dupl // parallel with the sibling controllers on purpose; see dependency.go
 func (r *SearchAttributeReconciler) readyDependencies(
 	ctx context.Context,
 	attribute *temporalv1alpha1.SearchAttribute,
 ) (*temporalv1alpha1.Connection, string, error) {
-	conn, reason, err := r.getConnection(ctx, attribute.Spec.ConnectionRef, attribute.Namespace)
+	conn, reason, err := getConnection(ctx, r.Client, attribute.Spec.ConnectionRef.Name, attribute.Namespace)
 	if err != nil {
 		return nil, reason, err
 	}
@@ -502,28 +505,6 @@ func readyCondition(
 	}
 
 	return "", nil
-}
-
-// getConnection fetches a referenced Connection without judging its readiness.
-func (r *SearchAttributeReconciler) getConnection(
-	ctx context.Context,
-	ref corev1.LocalObjectReference,
-	k8sNamespace string,
-) (*temporalv1alpha1.Connection, string, error) {
-	conn := &temporalv1alpha1.Connection{}
-	key := types.NamespacedName{Namespace: k8sNamespace, Name: ref.Name}
-
-	if err := r.Get(ctx, key, conn); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, ReasonConnectionNotFound, fmt.Errorf("connection %s not found: %w", key, err)
-		}
-
-		// The Connection may well be fine; we just could not read it. That is
-		// still "readiness not established", so it is retried the same way.
-		return nil, ReasonConnectionNotReady, fmt.Errorf("getting connection %s: %w", key, err)
-	}
-
-	return conn, "", nil
 }
 
 // temporalClient resolves a Connection and dials the Temporal Service it
@@ -674,35 +655,13 @@ func (r *SearchAttributeReconciler) searchAttributesForDependency(
 	index string,
 ) handler.MapFunc {
 	return func(ctx context.Context, dependency client.Object) []ctrl.Request {
-		log := logf.FromContext(ctx)
-
-		attributes := &temporalv1alpha1.SearchAttributeList{}
-		if err := r.List(
-			ctx, attributes,
-			client.InNamespace(dependency.GetNamespace()),
-			client.MatchingFields{index: dependency.GetName()},
-		); err != nil {
-			// A map function has nowhere to return an error to, and taking the
-			// controller down over a failed list would be worse than missing
-			// the wake-up. The dependency requeue picks these up instead.
-			log.Error(err, "Failed to find SearchAttributes depending on resource",
-				"index", index, "dependency", client.ObjectKeyFromObject(dependency))
-
-			return nil
-		}
-
-		requests := make([]ctrl.Request, 0, len(attributes.Items))
-		for i := range attributes.Items {
-			requests = append(requests, ctrl.Request{
-				NamespacedName: client.ObjectKeyFromObject(&attributes.Items[i]),
-			})
-		}
-
-		return requests
+		return dependants(ctx, r.Client, &temporalv1alpha1.SearchAttributeList{}, index, dependency)
 	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
+//
+//nolint:dupl // parallel with the sibling controllers on purpose; see dependency.go
 func (r *SearchAttributeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Resolver == nil {
 		// Read through the API reader rather than the cache: caching Secrets
