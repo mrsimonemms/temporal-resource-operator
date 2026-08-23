@@ -1,3 +1,5 @@
+# This is created by the operator - if this is deleted, it
+# deletes the namespace from Temporal
 apiVersion: temporal.simonemms.com/v1alpha1
 kind: Namespace
 metadata:
@@ -10,3 +12,24 @@ spec:
   connectionRef:
     name: connection-sample
   retention: 72h
+  # Delete is the default. Set it to Orphan to leave the Temporal namespace
+  # behind when this resource is deleted - which is also how a deletion blocked
+  # on a missing Connection is released.
+  deletionPolicy: Delete
+---
+# This is exists before the operator - if this is deleted, it
+# is NOT deleted from Temporal. However, it will still update
+# the settings of the namespace
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: kustomize
+  # The resource name is the Temporal namespace name
+  name: default
+spec:
+  connectionRef:
+    name: connection-sample
+  retention: 24h
+  deletionPolicy: Orphan

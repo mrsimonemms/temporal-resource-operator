@@ -30,6 +30,80 @@ import (
 // through admission.
 const DefaultRetention = 72 * time.Hour
 
+// NamespaceFinalizer holds a Namespace open until the operator has decided what
+// to do with the Temporal namespace it manages.
+const NamespaceFinalizer = "temporal.simonemms.com/namespace"
+
+// NamespaceOwnership records how a Namespace came to manage its Temporal
+// namespace, and therefore whether deleting the resource should delete the
+// Temporal namespace too.
+//
+// The value is set once and then left alone: an established ownership never
+// flips between Created and Adopted, because whether the Temporal namespace
+// happens to exist right now says nothing about who put it there.
+// +kubebuilder:validation:Enum=Creating;Created;Adopted
+type NamespaceOwnership string
+
+const (
+	// NamespaceOwnershipCreating records that the operator found the Temporal
+	// namespace missing and is about to register it. It is written before the
+	// registration call, so that a reconcile interrupted between registering
+	// and recording the result can still tell that the namespace it now sees is
+	// its own work rather than something it should adopt.
+	NamespaceOwnershipCreating NamespaceOwnership = "Creating"
+
+	// NamespaceOwnershipCreated records that this resource caused the Temporal
+	// namespace to exist. Deleting the resource deletes the namespace.
+	NamespaceOwnershipCreated NamespaceOwnership = "Created"
+
+	// NamespaceOwnershipAdopted records that the Temporal namespace pre-dated
+	// this resource. The operator manages its configuration but does not own
+	// its lifecycle, so deleting the resource leaves the namespace alone.
+	NamespaceOwnershipAdopted NamespaceOwnership = "Adopted"
+)
+
+// OwnsTemporalNamespace reports whether deleting this resource should delete the
+// Temporal namespace.
+//
+// Creating counts as owned. The marker is only ever written after the operator
+// has seen the namespace missing, so anything under that name is either this
+// resource's own registration or nothing at all - and deleting nothing is
+// harmless.
+func (o NamespaceOwnership) OwnsTemporalNamespace() bool {
+	return o == NamespaceOwnershipCreating || o == NamespaceOwnershipCreated
+}
+
+// IsEstablished reports whether ownership has been settled one way or the other.
+func (o NamespaceOwnership) IsEstablished() bool {
+	return o == NamespaceOwnershipCreated || o == NamespaceOwnershipAdopted
+}
+
+// NamespaceDeletionPolicy decides what becomes of the Temporal namespace when
+// the resource managing it is deleted.
+//
+// It governs lifecycle, not ownership: it can only ever stop the operator
+// deleting a namespace, never grant it the right to delete one it does not own.
+// +kubebuilder:validation:Enum=Delete;Orphan
+type NamespaceDeletionPolicy string
+
+const (
+	// NamespaceDeletionPolicyDelete removes the Temporal namespace along with
+	// the resource - but only where the resource owns it, and only once
+	// Temporal's own metadata confirms as much. Anything the operator cannot
+	// prove is its own is left alone, as it always was.
+	NamespaceDeletionPolicyDelete NamespaceDeletionPolicy = "Delete"
+
+	// NamespaceDeletionPolicyOrphan leaves the Temporal namespace exactly where
+	// it is, whoever owns it. The operator asks Temporal nothing at all, so
+	// deletion succeeds even when the Connection it would have needed is gone.
+	NamespaceDeletionPolicyOrphan NamespaceDeletionPolicy = "Orphan"
+)
+
+// DefaultDeletionPolicy is applied when a Namespace does not ask for one. It
+// matches the CRD's default, and is applied again in Go so that an object built
+// in memory behaves the same as one that has been through admission.
+const DefaultDeletionPolicy = NamespaceDeletionPolicyDelete
+
 // NamespaceSpec defines the desired state of Namespace
 type NamespaceSpec struct {
 	// connectionRef references the Connection, in the same Kubernetes
@@ -46,6 +120,24 @@ type NamespaceSpec struct {
 	// +optional
 	// +kubebuilder:default="72h"
 	Retention *metav1.Duration `json:"retention,omitempty"`
+
+	// deletionPolicy decides what happens to the Temporal namespace when this
+	// resource is deleted. Defaults to Delete.
+	//
+	// Delete removes the Temporal namespace along with the resource, where the
+	// operator owns it and can prove so from Temporal's own metadata. That
+	// needs a working Connection, so deletion waits rather than orphaning a
+	// namespace it is responsible for.
+	//
+	// Orphan leaves the Temporal namespace behind and contacts Temporal not at
+	// all, which is how a resource is released when the Connection it would
+	// have needed no longer exists.
+	//
+	// This may be changed while the resource is being deleted, which is the
+	// supported way out of a deletion blocked on a missing Connection.
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy NamespaceDeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // RetentionDuration returns the requested retention, falling back to
@@ -56,6 +148,19 @@ func (s NamespaceSpec) RetentionDuration() time.Duration {
 	}
 
 	return s.Retention.Duration
+}
+
+// DeletionPolicyValue returns the requested deletion policy, falling back to
+// DefaultDeletionPolicy when it is unset.
+//
+// This is the one place the policy is resolved, so an object built in memory
+// and one defaulted by the API server are read the same way.
+func (s NamespaceSpec) DeletionPolicyValue() NamespaceDeletionPolicy {
+	if s.DeletionPolicy == "" {
+		return DefaultDeletionPolicy
+	}
+
+	return s.DeletionPolicy
 }
 
 // NamespaceStatus defines the observed state of Namespace.
@@ -75,13 +180,23 @@ type NamespaceStatus struct {
 	// last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// ownership records whether the operator created the Temporal namespace or
+	// adopted one that already existed, and therefore whether deleting this
+	// resource deletes the Temporal namespace.
+	//
+	// "Creating" is a transient marker written immediately before registering a
+	// namespace; it settles to "Created" once registration is confirmed.
+	// +optional
+	Ownership NamespaceOwnership `json:"ownership,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Namespaced
+// +kubebuilder:resource:scope=Namespaced,shortName=tns
 // +kubebuilder:printcolumn:name="Connection",type=string,JSONPath=".spec.connectionRef.name"
 // +kubebuilder:printcolumn:name="Retention",type=string,JSONPath=".spec.retention"
+// +kubebuilder:printcolumn:name="Ownership",type=string,JSONPath=".status.ownership"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
