@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -40,14 +41,23 @@ import (
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
 
-// Reasons reported on a Namespace's Ready condition.
+// Reasons reported on a Namespace's Ready condition. They describe what the
+// reconcile did; the durable record of who owns the namespace is
+// status.ownership.
 const (
 	// ReasonCreated means the Temporal namespace was registered by this
 	// reconcile.
 	ReasonCreated = "Created"
 
-	// ReasonReconciled means the Temporal namespace already existed and needed
-	// no work.
+	// ReasonAdopted means a pre-existing Temporal namespace was taken under
+	// management by this reconcile.
+	ReasonAdopted = "Adopted"
+
+	// ReasonUpdated means the Temporal namespace's configuration had drifted
+	// and was corrected.
+	ReasonUpdated = "Updated"
+
+	// ReasonReconciled means the Temporal namespace already matched the spec.
 	ReasonReconciled = "Reconciled"
 
 	// ReasonConnectionNotFound means the referenced Connection does not exist.
@@ -62,12 +72,53 @@ const (
 
 	// ReasonCreateFailed means the Temporal namespace could not be registered.
 	ReasonCreateFailed = "CreateFailed"
+
+	// ReasonUpdateFailed means drifted configuration could not be corrected.
+	ReasonUpdateFailed = "UpdateFailed"
+
+	// ReasonDeleteFailed means an owned Temporal namespace could not be
+	// removed, so the finalizer is being held.
+	ReasonDeleteFailed = "DeleteFailed"
+
+	// ReasonOwnershipConflict means the Temporal namespace carries another
+	// Namespace resource's ownership marker. The operator will not adopt,
+	// reconfigure or remove it.
+	ReasonOwnershipConflict = "OwnershipConflict"
+
+	// ReasonOwnershipUnverified means a namespace this resource believes it
+	// owns cannot be confirmed as its own from Temporal's own metadata, so a
+	// destructive operation has been refused.
+	ReasonOwnershipUnverified = "OwnershipUnverified"
+)
+
+// namespaceOwnerKey is the Temporal namespace metadata key under which the
+// operator records the UID of the Namespace resource that registered it.
+//
+// The UID, rather than the name, is what makes this useful: deleting a resource
+// and recreating it under the same name produces a new UID, so the replacement
+// cannot inherit the original's claim on a Temporal namespace.
+const namespaceOwnerKey = "temporal.simonemms.com/owner-uid"
+
+// namespaceOwner is what a Temporal namespace's own metadata says about who
+// owns it. It is deliberately independent of status.ownership: the point of the
+// marker is to check the operator's belief against the outside world.
+type namespaceOwner int
+
+const (
+	// ownerUnmarked means the namespace carries no operator ownership marker.
+	ownerUnmarked namespaceOwner = iota
+
+	// ownerSelf means the marker names the resource being reconciled.
+	ownerSelf
+
+	// ownerOther means the marker names some other resource.
+	ownerOther
 )
 
 const (
 	// namespaceResyncInterval is how often a reconciled Namespace is checked
 	// again. The Temporal Service is outside Kubernetes, so nothing will tell
-	// us if the namespace disappears.
+	// us if the namespace disappears or is reconfigured behind our back.
 	namespaceResyncInterval = 5 * time.Minute
 
 	// dependencyRetryInterval is how soon to look again when the referenced
@@ -86,7 +137,9 @@ const (
 // a Temporal Service.
 type TemporalNamespaceClient interface {
 	DescribeNamespace(ctx context.Context, name string) (*temporal.Namespace, error)
-	CreateNamespace(ctx context.Context, name string, retention time.Duration) error
+	CreateNamespace(ctx context.Context, name string, retention time.Duration, data map[string]string) error
+	UpdateNamespaceRetention(ctx context.Context, name string, retention time.Duration) error
+	DeleteNamespace(ctx context.Context, name string) error
 	Close()
 }
 
@@ -103,17 +156,14 @@ type NamespaceReconciler struct {
 	Connect func(ctx context.Context, opts *sdkclient.Options) (TemporalNamespaceClient, error)
 }
 
-// +kubebuilder:rbac:groups=temporal.simonemms.com,resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups=temporal.simonemms.com,resources=namespaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=temporal.simonemms.com,resources=namespaces/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=temporal.simonemms.com,resources=namespaces/finalizers,verbs=update
 // +kubebuilder:rbac:groups=temporal.simonemms.com,resources=connections,verbs=get;list;watch
 
 // Reconcile ensures the Temporal namespace named by this resource exists on the
-// referenced Connection's Temporal Service, and reports the outcome on the
-// Ready condition.
-//
-// Deleting a Namespace stops the operator managing that Temporal namespace; the
-// namespace itself is left alone, so there is nothing to clean up and no
-// finalizer is registered.
+// referenced Connection's Temporal Service, matches the spec, and is removed
+// again if - and only if - this resource is what created it.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
@@ -133,9 +183,21 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	// Snapshot the status as it is stored, before anything below mutates it in
+	// memory. The final write compares against this rather than against its own
+	// starting point, so a change made during reconciliation - ownership in
+	// particular - is never mistaken for a no-op.
+	observed := ns.Status.DeepCopy()
+
 	if !ns.GetDeletionTimestamp().IsZero() {
-		log.Info("Namespace is being deleted")
-		return ctrl.Result{}, nil
+		return r.finalise(ctx, ns, observed)
+	}
+
+	// The finalizer has to be in place before anything is registered in
+	// Temporal. Registering first would leave a window in which a deletion
+	// races the create and orphans the namespace.
+	if err := r.ensureFinalizer(ctx, ns); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	reason, message, reconcileErr := r.reconcileNamespace(ctx, ns)
@@ -152,7 +214,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		condition.Message = reconcileErr.Error()
 	}
 
-	if err := r.updateNamespaceStatus(ctx, ns, condition); err != nil {
+	if err := r.updateNamespaceStatus(ctx, ns, observed, condition); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -172,9 +234,9 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 }
 
-// reconcileNamespace ensures the Temporal namespace exists, returning the
-// reason and, on success, the message to report. A non-nil error means the
-// Namespace is not Ready.
+// reconcileNamespace brings the Temporal namespace into line with the spec,
+// returning the reason and, on success, the message to report. A non-nil error
+// means the Namespace is not Ready.
 func (r *NamespaceReconciler) reconcileNamespace(
 	ctx context.Context,
 	ns *temporalv1alpha1.Namespace,
@@ -187,43 +249,351 @@ func (r *NamespaceReconciler) reconcileNamespace(
 	ctx, cancel := context.WithTimeout(ctx, namespaceTimeout)
 	defer cancel()
 
-	opts, err := r.Resolver.ResolveConnection(ctx, conn)
+	temporalClient, reason, err := r.temporalClient(ctx, conn)
 	if err != nil {
-		return ReasonInvalidConfiguration, "", err
-	}
-
-	temporalClient, err := r.connectNamespace(ctx, opts)
-	if err != nil {
-		return ReasonConnectionFailed, "", err
+		return reason, "", err
 	}
 	defer temporalClient.Close()
 
-	name := ns.TemporalName()
-
-	switch _, err := temporalClient.DescribeNamespace(ctx, name); {
+	actual, err := temporalClient.DescribeNamespace(ctx, ns.TemporalName())
+	switch {
 	case err == nil:
-		// Already registered. Retention and every other setting are left as
-		// they are - drift reconciliation is a separate concern.
-		return ReasonReconciled, fmt.Sprintf("Temporal namespace %q exists", name), nil
+		return r.reconcileExisting(ctx, ns, temporalClient, actual)
 	case !errors.Is(err, temporal.ErrNamespaceNotFound):
 		return ReasonDescribeFailed, "", err
 	}
 
+	return r.createNamespace(ctx, ns, temporalClient)
+}
+
+// createNamespace registers a Temporal namespace that does not exist and, if
+// ownership has not been settled yet, takes ownership of it.
+//
+// Ownership is recorded as Creating *before* the registration call. That write
+// is what makes the create survivable: if this reconcile dies between
+// registering the namespace and recording the result, the next one finds the
+// namespace present with ownership already at Creating, and so knows the
+// namespace is its own work rather than something to adopt.
+//
+// An already-settled ownership is left alone. A namespace that was adopted and
+// has since been removed behind the operator's back is put back, but that does
+// not make the operator its owner - the user's namespace does not become the
+// operator's to delete just because it had to be restored.
+func (r *NamespaceReconciler) createNamespace(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+	temporalClient TemporalNamespaceClient,
+) (reason, message string, err error) {
+	establishing := !ns.Status.Ownership.IsEstablished()
+
+	if establishing {
+		if err := r.persistOwnership(ctx, ns, temporalv1alpha1.NamespaceOwnershipCreating); err != nil {
+			return ReasonCreateFailed, "", fmt.Errorf("recording intent to create Temporal namespace: %w", err)
+		}
+	}
+
+	name := ns.TemporalName()
 	retention := ns.Spec.RetentionDuration()
-	if err := temporalClient.CreateNamespace(ctx, name, retention); err != nil {
+
+	// Stamp the namespace with this resource's identity as it is registered, so
+	// that no namespace the operator owns has ever existed unmarked. A
+	// namespace being restored under an adopted ownership is left unmarked: the
+	// operator manages it, but it was never the operator's to own.
+	var data map[string]string
+	if ns.Status.Ownership != temporalv1alpha1.NamespaceOwnershipAdopted {
+		data = map[string]string{namespaceOwnerKey: string(ns.UID)}
+	}
+
+	if err := temporalClient.CreateNamespace(ctx, name, retention, data); err != nil {
 		return ReasonCreateFailed, "", err
+	}
+
+	if establishing {
+		// Settled in memory; the caller's status write persists it alongside
+		// the Ready condition. Should that write fail, ownership stays at
+		// Creating and the next reconcile resolves it to Created.
+		ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
 	}
 
 	return ReasonCreated, fmt.Sprintf("Registered Temporal namespace %q with retention %s", name, retention), nil
 }
 
-// readyConnection fetches the referenced Connection and checks that it has
-// reported itself Ready.
+// reconcileExisting takes ownership of a Temporal namespace that already exists
+// and corrects any drift in the settings the operator manages.
+func (r *NamespaceReconciler) reconcileExisting(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+	temporalClient TemporalNamespaceClient,
+	actual *temporal.Namespace,
+) (reason, message string, err error) {
+	name := ns.TemporalName()
+
+	owner, marker := ownerOf(ns, actual)
+	if owner == ownerOther {
+		// A conflict outranks everything else. This namespace is not ours to
+		// adopt, to reconfigure, or - later - to delete, and the operator will
+		// not take it over on its own initiative.
+		return ReasonOwnershipConflict, "", fmt.Errorf(
+			"temporal namespace %q belongs to Namespace UID %s, not %s", name, marker, ns.UID,
+		)
+	}
+
+	adopting := establishOwnership(ns, owner)
+
+	desired := ns.Spec.RetentionDuration()
+	if actual.Retention == desired {
+		if adopting {
+			return ReasonAdopted, fmt.Sprintf("Adopted existing Temporal namespace %q", name), nil
+		}
+
+		return ReasonReconciled, fmt.Sprintf("Temporal namespace %q matches the spec", name), nil
+	}
+
+	if err := temporalClient.UpdateNamespaceRetention(ctx, name, desired); err != nil {
+		return ReasonUpdateFailed, "", err
+	}
+
+	return ReasonUpdated, fmt.Sprintf(
+		"Updated Temporal namespace %q retention from %s to %s", name, actual.Retention, desired,
+	), nil
+}
+
+// ownerOf reads the ownership marker off a Temporal namespace and compares it
+// with the resource in hand, also returning the marker's raw value so that a
+// conflict can be reported usefully.
+func ownerOf(ns *temporalv1alpha1.Namespace, actual *temporal.Namespace) (owner namespaceOwner, marker string) {
+	if actual == nil {
+		return ownerUnmarked, ""
+	}
+
+	marker = actual.Data[namespaceOwnerKey]
+
+	switch {
+	case marker == "":
+		return ownerUnmarked, ""
+	case marker == string(ns.UID):
+		return ownerSelf, marker
+	default:
+		return ownerOther, marker
+	}
+}
+
+// establishOwnership settles, once, how this resource came to manage an
+// existing Temporal namespace. It reports whether that settled to a fresh
+// adoption.
 //
-// Readiness is a cheap gate that keeps the operator from dialling a Temporal
-// Service already known to be broken. It is not a guarantee: a Connection can
-// be stale, so Temporal calls made afterwards still report their own errors.
-func (r *NamespaceReconciler) readyConnection(
+// The decision comes from Temporal's own metadata rather than from the mere
+// existence of the namespace. An interrupted create is recognised by its
+// marker, not by the coincidence of a namespace being there.
+//
+// An established ownership is never revisited: whether the namespace exists
+// right now says nothing about who created it, so re-deriving ownership from
+// its existence would let a Created namespace silently become Adopted.
+func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bool {
+	if ns.Status.Ownership.IsEstablished() {
+		return false
+	}
+
+	if owner == ownerSelf {
+		// Temporal says this resource registered the namespace, so it did -
+		// however the reconcile that registered it happened to end.
+		ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+
+		return false
+	}
+
+	// No marker. Whatever is there was not registered by this resource, even if
+	// an earlier reconcile was part-way through creating one: the operator only
+	// ever registers namespaces with the marker already on them. Adopting is
+	// the conservative reading, because an adopted namespace is never deleted.
+	ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipAdopted
+
+	return true
+}
+
+// finalise runs the deletion flow: remove the Temporal namespace if this
+// resource owns it and has been asked to, then release the finalizer.
+func (r *NamespaceReconciler) finalise(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+	observed *temporalv1alpha1.NamespaceStatus,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+		// Nothing is holding the resource open, so it is already on its way out.
+		return ctrl.Result{}, nil
+	}
+
+	name := ns.TemporalName()
+	ownership := ns.Status.Ownership
+
+	// Orphan is checked first, and deliberately before anything that needs a
+	// Connection. It is the way out of a deletion that would otherwise be
+	// blocked forever - a namespace whose Connection has been deleted, or whose
+	// ownership Temporal can no longer confirm - so it must not depend on any
+	// of the machinery that could be what is broken.
+	if policy := ns.Spec.DeletionPolicyValue(); policy == temporalv1alpha1.NamespaceDeletionPolicyOrphan {
+		log.Info("Leaving Temporal namespace in place",
+			"namespace", name, "deletionPolicy", string(policy))
+
+		return ctrl.Result{}, r.removeFinalizer(ctx, ns)
+	}
+
+	if !ownership.OwnsTemporalNamespace() {
+		// Adopted, or never established. Either way this resource did not
+		// create the namespace, so it has no business deleting it.
+		log.Info("Leaving Temporal namespace in place",
+			"namespace", name, "ownership", string(ownership))
+
+		return ctrl.Result{}, r.removeFinalizer(ctx, ns)
+	}
+
+	if reason, err := r.deleteTemporalNamespace(ctx, ns); err != nil {
+		log.Error(err, "Failed to delete Temporal namespace", "namespace", name, "reason", reason)
+
+		// Hold the finalizer. Releasing it now would either orphan a namespace
+		// this resource is responsible for, or walk away from an unresolved
+		// ownership problem without anyone noticing.
+		condition := &metav1.Condition{
+			Type:               temporalv1alpha1.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            err.Error(),
+			ObservedGeneration: ns.Generation,
+		}
+		if statusErr := r.updateNamespaceStatus(ctx, ns, observed, condition); statusErr != nil {
+			// Reporting why deletion is stuck is a convenience; the deletion
+			// error is the one worth retrying on.
+			log.Error(statusErr, "Failed to record deletion failure")
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Finished with Temporal namespace", "namespace", name)
+
+	return ctrl.Result{}, r.removeFinalizer(ctx, ns)
+}
+
+// deleteTemporalNamespace removes the Temporal namespace this resource owns,
+// but only once Temporal's own metadata confirms the namespace is this
+// resource's to remove. It returns the reason to report when it refuses or
+// fails.
+//
+// status.ownership is what gets us here; it is not on its own enough to destroy
+// anything. The marker is checked immediately before the delete so that a
+// namespace which has been replaced, re-registered by someone else, or stripped
+// of its metadata since the resource was created is never removed by mistake.
+//
+// A namespace that has already gone counts as success, so deletion is
+// idempotent across retries.
+func (r *NamespaceReconciler) deleteTemporalNamespace(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+) (string, error) {
+	log := logf.FromContext(ctx)
+
+	// Deletion needs a working Connection. Readiness is deliberately not
+	// required here: it is a cached judgement that may be stale, and giving up
+	// on an owned namespace because of a stale status would orphan it.
+	conn, reason, err := r.getConnection(ctx, ns)
+	if err != nil {
+		return reason, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, namespaceTimeout)
+	defer cancel()
+
+	temporalClient, reason, err := r.temporalClient(ctx, conn)
+	if err != nil {
+		return reason, err
+	}
+	defer temporalClient.Close()
+
+	name := ns.TemporalName()
+
+	actual, err := temporalClient.DescribeNamespace(ctx, name)
+	if err != nil {
+		if errors.Is(err, temporal.ErrNamespaceNotFound) {
+			// Nothing left to remove - possibly deleted by an earlier attempt
+			// that failed before releasing the finalizer, possibly never
+			// registered at all. This is the one place a missing namespace
+			// counts as success.
+			log.Info("Temporal namespace is already gone", "namespace", name)
+
+			return "", nil
+		}
+
+		return ReasonDescribeFailed, err
+	}
+
+	switch owner, marker := ownerOf(ns, actual); owner {
+	case ownerOther:
+		return ReasonOwnershipConflict, fmt.Errorf(
+			"refusing to delete temporal namespace %q: it belongs to Namespace UID %s, not %s",
+			name, marker, ns.UID,
+		)
+	case ownerUnmarked:
+		return ReasonOwnershipUnverified, fmt.Errorf(
+			"refusing to delete temporal namespace %q: it carries no %s marker, so it cannot be confirmed "+
+				"as this resource's to remove; resolve it by hand, then remove the %s finalizer",
+			name, namespaceOwnerKey, temporalv1alpha1.NamespaceFinalizer,
+		)
+	case ownerSelf:
+	}
+
+	if err := temporalClient.DeleteNamespace(ctx, name); err != nil {
+		// A not-found here is *not* treated as success. The describe above
+		// proved the namespace is there, and the Service will briefly fail to
+		// resolve a namespace registered moments earlier - it answers describe
+		// from storage but delete from its namespace registry, which lags.
+		// Releasing the finalizer on that would orphan a live namespace, so let
+		// it retry instead; the registry catches up within seconds.
+		return ReasonDeleteFailed, err
+	}
+
+	return "", nil
+}
+
+// ensureFinalizer adds the finalizer if it is missing.
+func (r *NamespaceReconciler) ensureFinalizer(ctx context.Context, ns *temporalv1alpha1.Namespace) error {
+	patch := finalizerPatch(ns)
+
+	if !controllerutil.AddFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+		return nil
+	}
+
+	return r.Patch(ctx, ns, patch)
+}
+
+// removeFinalizer releases the finalizer, allowing Kubernetes to remove the
+// resource.
+func (r *NamespaceReconciler) removeFinalizer(ctx context.Context, ns *temporalv1alpha1.Namespace) error {
+	patch := finalizerPatch(ns)
+
+	if !controllerutil.RemoveFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+		return nil
+	}
+
+	return r.Patch(ctx, ns, patch)
+}
+
+// finalizerPatch captures the resource as it stands, so that only the finalizer
+// change is sent.
+//
+// A full update would round-trip the spec, and marshalling it rewrites
+// metav1.Duration into its canonical form - "36h" becomes "36h0m0s". The API
+// server sees that as a spec change, bumps the generation, and wakes the
+// controller up again for no reason. Optimistic locking makes a concurrent
+// finalizer write a retryable conflict rather than a silent clobber.
+func finalizerPatch(ns *temporalv1alpha1.Namespace) client.Patch {
+	return client.MergeFromWithOptions(ns.DeepCopy(), client.MergeFromWithOptimisticLock{})
+}
+
+// getConnection fetches the referenced Connection without judging its
+// readiness.
+func (r *NamespaceReconciler) getConnection(
 	ctx context.Context,
 	ns *temporalv1alpha1.Namespace,
 ) (*temporalv1alpha1.Connection, string, error) {
@@ -240,6 +610,26 @@ func (r *NamespaceReconciler) readyConnection(
 		return nil, ReasonConnectionNotReady, fmt.Errorf("getting connection %s: %w", key, err)
 	}
 
+	return conn, "", nil
+}
+
+// readyConnection fetches the referenced Connection and checks that it has
+// reported itself Ready.
+//
+// Readiness is a cheap gate that keeps the operator from dialling a Temporal
+// Service already known to be broken. It is not a guarantee: a Connection can
+// be stale, so Temporal calls made afterwards still report their own errors.
+func (r *NamespaceReconciler) readyConnection(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+) (*temporalv1alpha1.Connection, string, error) {
+	conn, reason, err := r.getConnection(ctx, ns)
+	if err != nil {
+		return nil, reason, err
+	}
+
+	key := types.NamespacedName{Namespace: conn.Namespace, Name: conn.Name}
+
 	ready := meta.FindStatusCondition(conn.Status.Conditions, temporalv1alpha1.ConditionTypeReady)
 	switch {
 	case ready == nil:
@@ -249,6 +639,25 @@ func (r *NamespaceReconciler) readyConnection(
 	}
 
 	return conn, "", nil
+}
+
+// temporalClient resolves a Connection and dials the Temporal Service it
+// describes.
+func (r *NamespaceReconciler) temporalClient(
+	ctx context.Context,
+	conn *temporalv1alpha1.Connection,
+) (TemporalNamespaceClient, string, error) {
+	opts, err := r.Resolver.ResolveConnection(ctx, conn)
+	if err != nil {
+		return nil, ReasonInvalidConfiguration, err
+	}
+
+	temporalClient, err := r.connectNamespace(ctx, opts)
+	if err != nil {
+		return nil, ReasonConnectionFailed, err
+	}
+
+	return temporalClient, "", nil
 }
 
 // connectNamespace dials a Temporal Service, using the injected dialler if one
@@ -264,20 +673,40 @@ func (r *NamespaceReconciler) connectNamespace(
 	return temporal.New(ctx, opts)
 }
 
+// persistOwnership writes an ownership transition straight to the API server.
+//
+// Unlike the Ready condition, this cannot wait until the end of the reconcile:
+// the value has to be durable before the Temporal call it describes is made.
+func (r *NamespaceReconciler) persistOwnership(
+	ctx context.Context,
+	ns *temporalv1alpha1.Namespace,
+	ownership temporalv1alpha1.NamespaceOwnership,
+) error {
+	if ns.Status.Ownership == ownership {
+		return nil
+	}
+
+	ns.Status.Ownership = ownership
+
+	return r.Status().Update(ctx, ns)
+}
+
 // updateNamespaceStatus writes the condition to the Namespace, doing nothing if
-// the status is already correct. Skipping the no-op write keeps the controller
-// from waking itself up over and over.
+// the stored status already says the same thing. Skipping the no-op write keeps
+// the controller from waking itself up over and over.
+//
+// observed is the status as it was read at the start of the reconcile, so
+// changes made along the way are still detected.
 func (r *NamespaceReconciler) updateNamespaceStatus(
 	ctx context.Context,
 	ns *temporalv1alpha1.Namespace,
+	observed *temporalv1alpha1.NamespaceStatus,
 	condition *metav1.Condition,
 ) error {
-	before := ns.Status.DeepCopy()
-
 	meta.SetStatusCondition(&ns.Status.Conditions, *condition)
 	ns.Status.ObservedGeneration = ns.Generation
 
-	if equality.Semantic.DeepEqual(before, &ns.Status) {
+	if equality.Semantic.DeepEqual(observed, &ns.Status) {
 		return nil
 	}
 
@@ -295,7 +724,8 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		// Only the spec matters here, so ignore the status writes this
-		// controller makes itself.
+		// controller makes itself. Kubernetes bumps the generation when it
+		// stamps a deletion timestamp, so the finalizer flow still runs.
 		For(&temporalv1alpha1.Namespace{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("namespace").
 		Complete(r)
