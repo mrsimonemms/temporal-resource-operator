@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -115,6 +116,11 @@ const (
 	ownerOther
 )
 
+// namespaceConnectionRefIndex indexes Namespace resources by the name of the
+// Connection they reference. A Connection event can then find its dependants
+// with one indexed lookup instead of listing and scanning every Namespace.
+const namespaceConnectionRefIndex = ".spec.connectionRef.name"
+
 const (
 	// namespaceResyncInterval is how often a reconciled Namespace is checked
 	// again. The Temporal Service is outside Kubernetes, so nothing will tell
@@ -125,6 +131,11 @@ const (
 	// Connection is missing or not yet Ready. This is an expected transient
 	// state rather than a failure, so it is retried on a fixed interval rather
 	// than through error backoff.
+	//
+	// The watch on Connection is what normally ends the wait, and it does so
+	// immediately. This stays as a backstop for the cases a watch cannot cover
+	// - a dropped event, a cache resync gap - and is cheap enough at one
+	// reconcile per waiting Namespace per interval to leave alone.
 	dependencyRetryInterval = 30 * time.Second
 
 	// namespaceTimeout bounds the Temporal calls made by a single reconcile, so
@@ -713,6 +724,65 @@ func (r *NamespaceReconciler) updateNamespaceStatus(
 	return r.Status().Update(ctx, ns)
 }
 
+// indexNamespaceByConnection extracts the Connection a Namespace references, so
+// that dependants can be looked up by it.
+//
+// It is called for every Namespace the cache holds, including ones that are
+// half-built or of the wrong type, so it never assumes anything about what it
+// is handed.
+func indexNamespaceByConnection(obj client.Object) []string {
+	ns, ok := obj.(*temporalv1alpha1.Namespace)
+	if !ok || ns == nil {
+		return nil
+	}
+
+	name := ns.Spec.ConnectionRef.Name
+	if name == "" {
+		// An unreferenced Namespace is simply absent from the index rather than
+		// indexed under the empty string, where a malformed lookup could find
+		// it.
+		return nil
+	}
+
+	return []string{name}
+}
+
+// namespacesForConnection maps a Connection event onto the Namespaces that
+// depend on it.
+//
+// Both kinds are namespaced, and a Connection only ever serves Namespaces
+// beside it, so the list is confined to the Connection's own Kubernetes
+// namespace as well as being filtered by the index. Two Namespaces in different
+// Kubernetes namespaces may reference the same Connection name and have nothing
+// to do with each other.
+func (r *NamespaceReconciler) namespacesForConnection(ctx context.Context, conn client.Object) []ctrl.Request {
+	log := logf.FromContext(ctx)
+
+	namespaces := &temporalv1alpha1.NamespaceList{}
+	if err := r.List(
+		ctx, namespaces,
+		client.InNamespace(conn.GetNamespace()),
+		client.MatchingFields{namespaceConnectionRefIndex: conn.GetName()},
+	); err != nil {
+		// A map function has nowhere to return an error to, and taking the
+		// controller down over a failed list would be worse than missing the
+		// wake-up. The dependency requeue picks these up instead.
+		log.Error(err, "Failed to find Namespaces depending on Connection",
+			"connection", client.ObjectKeyFromObject(conn))
+
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(namespaces.Items))
+	for i := range namespaces.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(&namespaces.Items[i]),
+		})
+	}
+
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Resolver == nil {
@@ -722,11 +792,34 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Resolver = connection.NewResolver(mgr.GetAPIReader())
 	}
 
+	// The cache has not started yet, so this only registers the indexer and
+	// returns; there is nothing for a caller's context to cancel.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&temporalv1alpha1.Namespace{},
+		namespaceConnectionRefIndex,
+		indexNamespaceByConnection,
+	); err != nil {
+		return fmt.Errorf("indexing namespaces by %s: %w", namespaceConnectionRefIndex, err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		// Only the spec matters here, so ignore the status writes this
 		// controller makes itself. Kubernetes bumps the generation when it
 		// stamps a deletion timestamp, so the finalizer flow still runs.
 		For(&temporalv1alpha1.Namespace{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Wake dependants as soon as their Connection changes, rather than
+		// leaving them to notice on their next retry.
+		//
+		// Deliberately unfiltered. A Connection's readiness lives in its
+		// status, so the generation predicate guarding the primary resource
+		// above would discard precisely the events that matter here - and
+		// predicates passed to For() apply only to For(), so it does not reach
+		// this watch of its own accord.
+		Watches(
+			&temporalv1alpha1.Connection{},
+			handler.EnqueueRequestsFromMapFunc(r.namespacesForConnection),
+		).
 		Named("namespace").
 		Complete(r)
 }

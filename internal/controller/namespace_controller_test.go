@@ -35,7 +35,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
@@ -45,6 +48,10 @@ import (
 // missingSecretName names a Secret that deliberately does not exist, used to
 // make resolving a Connection fail.
 const missingSecretName = "missing-secret"
+
+// connectionReadyMessage mirrors what the Connection controller reports on a
+// healthy Connection.
+const connectionReadyMessage = "Temporal Service is reachable and healthy"
 
 // namespaceCall records a Temporal namespace call and the retention it carried.
 type namespaceCall struct {
@@ -213,6 +220,189 @@ func (w *flakyStatusWriter) Update(
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+var _ = Describe("Namespace Connection dependency", func() {
+	// The Connection two of the fixture Namespaces depend on, and one they do
+	// not.
+	const (
+		dependedOn = "foo"
+		unrelated  = "bar"
+	)
+
+	// indexedClient builds a client with the real index registered, so the
+	// mapper is exercised against the same lookup it uses in production.
+	indexedClient := func(objs ...ctrlclient.Object) ctrlclient.Client {
+		return fake.NewClientBuilder().
+			WithScheme(k8sClient.Scheme()).
+			WithIndex(&temporalv1alpha1.Namespace{}, namespaceConnectionRefIndex, indexNamespaceByConnection).
+			WithObjects(objs...).
+			Build()
+	}
+
+	// dependant builds a Namespace in the given Kubernetes namespace pointing at
+	// the named Connection.
+	dependant := func(k8sNamespace, name, connection string) *temporalv1alpha1.Namespace {
+		return &temporalv1alpha1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k8sNamespace},
+			Spec: temporalv1alpha1.NamespaceSpec{
+				ConnectionRef: corev1.LocalObjectReference{Name: connection},
+			},
+		}
+	}
+
+	// request is the reconcile request the watch should produce for a dependant.
+	request := func(k8sNamespace, name string) ctrl.Request {
+		return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: k8sNamespace, Name: name}}
+	}
+
+	Describe("the field index", func() {
+		DescribeTable(
+			"should index a Namespace by the Connection it references",
+			func(obj ctrlclient.Object, expected []string) {
+				Expect(indexNamespaceByConnection(obj)).To(Equal(expected))
+			},
+			Entry("a referenced Connection", dependant("default", "ns", dependedOn), []string{dependedOn}),
+			Entry("an empty reference",
+				dependant("default", "ns", ""), []string(nil)),
+			Entry("a nil Namespace",
+				(*temporalv1alpha1.Namespace)(nil), []string(nil)),
+			Entry("an object of another kind",
+				&temporalv1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: dependedOn}}, []string(nil)),
+		)
+
+		It("should not be affected by the rest of the spec", func() {
+			ns := dependant("default", "ns", dependedOn)
+			ns.Spec.Retention = &metav1.Duration{Duration: time.Hour}
+			ns.Spec.DeletionPolicy = temporalv1alpha1.NamespaceDeletionPolicyOrphan
+			ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+
+			Expect(indexNamespaceByConnection(ns)).To(Equal([]string{dependedOn}))
+		})
+	})
+
+	Describe("mapping a Connection event onto its dependants", func() {
+		var (
+			mapper *NamespaceReconciler
+			foo    *temporalv1alpha1.Connection
+		)
+
+		BeforeEach(func() {
+			// default/ns-a and default/ns-b depend on foo; default/ns-c uses a
+			// different Connection, and other/ns-d is a like-named Connection in
+			// a different Kubernetes namespace entirely.
+			mapper = &NamespaceReconciler{
+				Client: indexedClient(
+					dependant("default", "ns-a", dependedOn),
+					dependant("default", "ns-b", dependedOn),
+					dependant("default", "ns-c", unrelated),
+					dependant("other", "ns-d", dependedOn),
+				),
+			}
+
+			foo = &temporalv1alpha1.Connection{
+				ObjectMeta: metav1.ObjectMeta{Name: dependedOn, Namespace: "default"},
+			}
+		})
+
+		It("should enqueue only the dependants beside the Connection", func() {
+			requests := mapper.namespacesForConnection(ctx, foo)
+
+			Expect(requests).To(ConsistOf(
+				request("default", "ns-a"),
+				request("default", "ns-b"),
+			))
+			Expect(requests).NotTo(ContainElement(request("default", "ns-c")),
+				"a Namespace referencing another Connection is not a dependant")
+			Expect(requests).NotTo(ContainElement(request("other", "ns-d")),
+				"a like-named Connection in another Kubernetes namespace is a different Connection")
+		})
+
+		It("should produce no duplicates", func() {
+			requests := mapper.namespacesForConnection(ctx, foo)
+
+			seen := map[ctrl.Request]int{}
+			for _, req := range requests {
+				seen[req]++
+			}
+
+			for req, count := range seen {
+				Expect(count).To(Equal(1), "%s was enqueued more than once", req)
+			}
+		})
+
+		It("should map the same however the event arose", func() {
+			// The handler runs this for creates, updates and deletes alike, and
+			// a status-only update carries the same object identity, so all of
+			// them resolve to the same dependants.
+			ready := foo.DeepCopy()
+			meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
+				Type:   temporalv1alpha1.ConditionTypeReady,
+				Status: metav1.ConditionTrue,
+				Reason: ReasonConnected,
+			})
+
+			deleted := foo.DeepCopy()
+			deleted.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+
+			expected := ConsistOf(request("default", "ns-a"), request("default", "ns-b"))
+
+			Expect(mapper.namespacesForConnection(ctx, foo)).To(expected, "on create")
+			Expect(mapper.namespacesForConnection(ctx, ready)).To(expected, "on a status change")
+			Expect(mapper.namespacesForConnection(ctx, deleted)).To(expected, "on delete")
+		})
+
+		It("should return nothing when no Namespace depends on the Connection", func() {
+			unused := &temporalv1alpha1.Connection{
+				ObjectMeta: metav1.ObjectMeta{Name: "unused", Namespace: "default"},
+			}
+
+			Expect(mapper.namespacesForConnection(ctx, unused)).To(BeEmpty())
+		})
+
+		It("should give up quietly when the list fails", func() {
+			listErr := errors.New("cache is not ready")
+			failing := &NamespaceReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(k8sClient.Scheme()).
+					WithIndex(&temporalv1alpha1.Namespace{},
+						namespaceConnectionRefIndex, indexNamespaceByConnection).
+					WithInterceptorFuncs(interceptor.Funcs{
+						List: func(
+							context.Context, ctrlclient.WithWatch,
+							ctrlclient.ObjectList, ...ctrlclient.ListOption,
+						) error {
+							return listErr
+						},
+					}).
+					Build(),
+			}
+
+			var requests []ctrl.Request
+			Expect(func() {
+				requests = failing.namespacesForConnection(ctx, foo)
+			}).NotTo(Panic())
+
+			Expect(requests).To(BeEmpty())
+		})
+	})
+
+	Describe("controller setup", func() {
+		It("should register the index and the Connection watch", func() {
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme:                 k8sClient.Scheme(),
+				Metrics:                metricsserver.Options{BindAddress: "0"},
+				HealthProbeBindAddress: "0",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciler := &NamespaceReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+
+			// This fails if the index cannot be registered - a duplicate name,
+			// the wrong object type - or if the watch cannot be built.
+			Expect(reconciler.SetupWithManager(mgr)).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("Namespace Controller", func() {
 	const (
 		namespace = "default"
@@ -281,7 +471,7 @@ var _ = Describe("Namespace Controller", func() {
 			Type:               temporalv1alpha1.ConditionTypeReady,
 			Status:             status,
 			Reason:             ReasonConnected,
-			Message:            "Temporal Service is reachable and healthy",
+			Message:            connectionReadyMessage,
 			ObservedGeneration: conn.Generation,
 		})
 		Expect(k8sClient.Status().Update(ctx, conn)).To(Succeed())
@@ -1313,6 +1503,108 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
 			Expect(temporalClient.deleted).To(BeEmpty())
+		})
+	})
+
+	Context("when its Connection changes", func() {
+		// requestsForConnection runs the real mapper, with the real index
+		// registered, over the resource as it currently stands - standing in
+		// for what the watch would enqueue on a Connection event.
+		requestsForConnection := func(conn *temporalv1alpha1.Connection) []ctrl.Request {
+			mapper := &NamespaceReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(k8sClient.Scheme()).
+					WithIndex(&temporalv1alpha1.Namespace{},
+						namespaceConnectionRefIndex, indexNamespaceByConnection).
+					WithObjects(stored()).
+					Build(),
+			}
+
+			return mapper.namespacesForConnection(ctx, conn)
+		}
+
+		// thisNamespace is the reconcile request the watch should produce for
+		// the resource under test.
+		thisNamespace := func() []ctrl.Request {
+			return []ctrl.Request{{NamespacedName: key}}
+		}
+
+		It("should be woken when the Connection it was waiting for appears", func() {
+			createNamespace(nil)
+
+			result, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(readyCondition().Reason).To(Equal(ReasonConnectionNotFound))
+			Expect(result.RequeueAfter).To(Equal(dependencyRetryInterval),
+				"the timed retry stays as a backstop")
+
+			conn := createConnection(metav1.ConditionTrue)
+
+			By("confirming the Connection event names this Namespace")
+			Expect(requestsForConnection(conn)).To(Equal(thisNamespace()))
+
+			By("confirming the reconcile it triggers gets on with the work")
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCondition().Reason).To(Equal(ReasonCreated))
+			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+		})
+
+		It("should be woken when its Connection becomes Ready", func() {
+			conn := createConnection("")
+			createNamespace(nil)
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(readyCondition().Reason).To(Equal(ReasonConnectionNotReady))
+			Expect(dialled).To(BeZero())
+
+			By("marking the Connection Ready")
+			connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
+			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
+			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+				Type:    temporalv1alpha1.ConditionTypeReady,
+				Status:  metav1.ConditionTrue,
+				Reason:  ReasonConnected,
+				Message: connectionReadyMessage,
+			})
+			Expect(k8sClient.Status().Update(ctx, conn)).To(Succeed())
+
+			// Readiness lives in the status, so this is exactly the kind of
+			// event a generation-based predicate would have thrown away.
+			By("confirming the status-only change still names this Namespace")
+			Expect(requestsForConnection(conn)).To(Equal(thisNamespace()))
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+			Expect(dialled).To(Equal(1))
+		})
+
+		It("should be woken when its Connection is deleted", func() {
+			conn := createConnection(metav1.ConditionTrue)
+			createNamespace(nil)
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+
+			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
+
+			// The handler maps the last known object, so the dependants of a
+			// Connection that has just gone are still found.
+			By("confirming the delete event still names this Namespace")
+			Expect(requestsForConnection(conn)).To(Equal(thisNamespace()))
+
+			result, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition().Reason).To(Equal(ReasonConnectionNotFound))
+			Expect(result.RequeueAfter).To(Equal(dependencyRetryInterval))
 		})
 	})
 
