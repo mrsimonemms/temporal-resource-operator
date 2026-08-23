@@ -50,6 +50,14 @@ const metricsRoleBindingName = "app-metrics-binding"
 // namespace above.
 const controllerDeploymentName = "app-controller-manager"
 
+// watchResponseWindow is how long a Namespace is given to notice a change to
+// its Connection.
+//
+// It is deliberately well under the controller's 30s fallback retry, so a pass
+// cannot be explained away by the timer, and comfortably over the fraction of a
+// second the watch actually takes.
+const watchResponseWindow = 10 * time.Second
+
 // ownerMarkerKey mirrors the Temporal namespace metadata key the controller
 // stamps on namespaces it registers. It is spelled out here rather than
 // imported, because it is the externally visible contract these specs exist to
@@ -640,6 +648,70 @@ spec:
 			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
 			Expect(describeTemporalNamespace(temporalNamespace).NamespaceInfo.Data).
 				To(HaveKeyWithValue(ownerMarkerKey, uid))
+		})
+
+		It("should react to its Connection appearing without waiting for the retry", func() {
+			By("creating a Namespace before the Connection it references exists")
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("ConnectionNotFound"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("creating the Connection it was waiting for")
+			applyConnectionSample()
+
+			// Timed from the moment the Connection reports itself Ready. The
+			// window is a third of the fallback retry, so recovering inside it
+			// is the watch's doing rather than the timer's.
+			By("confirming the Namespace recovers promptly")
+			start := time.Now()
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, watchResponseWindow).Should(Succeed())
+
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"Namespace became Ready %s after its Connection did\n", time.Since(start).Round(time.Millisecond))
+
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"))
+		})
+
+		It("should react to its Connection going away and coming back", func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("deleting the Connection")
+			cmd := exec.Command("kubectl", "delete", "connection", "connection-sample",
+				"-n", "default", "--wait=true")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Connection")
+
+			By("confirming the Namespace notices promptly")
+			start := time.Now()
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("ConnectionNotFound"))
+			}, watchResponseWindow).Should(Succeed())
+
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"Namespace noticed the deletion after %s\n", time.Since(start).Round(time.Millisecond))
+
+			By("recreating the Connection under the same name")
+			applyConnectionSample()
+
+			By("confirming the Namespace recovers promptly")
+			start = time.Now()
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, watchResponseWindow).Should(Succeed())
+
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"Namespace recovered %s after its Connection came back\n", time.Since(start).Round(time.Millisecond))
 		})
 
 		It("should correct retention drift on a namespace it created", func() {
