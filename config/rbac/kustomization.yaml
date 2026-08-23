@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the app itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- searchattribute_admin_role.yaml
+- searchattribute_editor_role.yaml
+- searchattribute_viewer_role.yaml
 - namespace_admin_role.yaml
 - namespace_editor_role.yaml
 - namespace_viewer_role.yaml

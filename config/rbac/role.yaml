@@ -23,6 +23,7 @@ rules:
   resources:
   - connections/status
   - namespaces/status
+  - searchattributes/status
   verbs:
   - get
   - patch
@@ -31,6 +32,7 @@ rules:
   - temporal.simonemms.com
   resources:
   - namespaces
+  - searchattributes
   verbs:
   - get
   - list
@@ -41,5 +43,6 @@ rules:
   - temporal.simonemms.com
   resources:
   - namespaces/finalizers
+  - searchattributes/finalizers
   verbs:
   - update
