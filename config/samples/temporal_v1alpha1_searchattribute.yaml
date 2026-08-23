@@ -1,0 +1,40 @@
+# Registered by the operator - if this is deleted, the search attribute is
+# removed from the Temporal namespace.
+#
+# metadata.name is Kubernetes identity; spec.name is what Temporal is asked for.
+# They differ because Kubernetes only accepts lowercase resource names, while
+# Temporal search attributes are conventionally PascalCase.
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: SearchAttribute
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: kustomize
+  name: customer-id
+spec:
+  name: CustomerId
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: namespace-sample
+  type: Keyword
+  # Delete is the default. Set it to Orphan to leave the search attribute
+  # behind when this resource is deleted.
+  deletionPolicy: Delete
+---
+# An attribute that already existed on the Temporal namespace. The operator
+# keeps it in step but never removes it, whatever the deletion policy says.
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: SearchAttribute
+metadata:
+  labels:
+    app.kubernetes.io/name: app
+    app.kubernetes.io/managed-by: kustomize
+  name: order-status
+spec:
+  name: OrderStatus
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: namespace-sample
+  type: Keyword
