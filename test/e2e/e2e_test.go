@@ -35,20 +35,20 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "app-system"
+const namespace = "temporal-resource-operator-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "app-controller-manager"
+const serviceAccountName = "temporal-resource-operator-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "app-controller-manager-metrics-service"
+const metricsServiceName = "temporal-resource-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "app-metrics-binding"
+const metricsRoleBindingName = "temporal-resource-operator-metrics-binding"
 
 // controllerDeploymentName is the Deployment running the manager, in the
 // namespace above.
-const controllerDeploymentName = "app-controller-manager"
+const controllerDeploymentName = "temporal-resource-operator-controller-manager"
 
 // watchResponseWindow is how long a Namespace is given to notice a change to
 // its Connection.
@@ -198,7 +198,7 @@ var _ = Describe("Manager", Ordered, func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command(
 				"kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=app-metrics-reader",
+				"--clusterrole=temporal-resource-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)
@@ -1023,6 +1023,255 @@ spec:
 			}, 3*time.Minute).Should(Succeed())
 		})
 	})
+
+	Context("NexusEndpoint", func() {
+		var (
+			temporalNamespace string
+			resourceName      string
+			endpointName      string
+			taskQueue         string
+		)
+
+		BeforeEach(func() {
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), CurrentSpecReport().LineNumber())
+			temporalNamespace = "e2e-ne-ns-" + suffix
+			resourceName = "payments-nexus-" + suffix
+			endpointName = "PaymentsNexus" + strings.ReplaceAll(suffix, "-", "")
+			taskQueue = "payments-tq-" + suffix
+
+			By("removing anything an earlier spec left behind")
+			clearNexusResources(endpointName)
+			clearOperatorResources()
+
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Available",
+				"deployment/temporal", "-n", "temporal", "--timeout=5m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
+		})
+
+		AfterEach(func() {
+			// Order matters: Temporal refuses to delete a namespace while a
+			// Nexus endpoint targets it, so the endpoint has to go first.
+			By("removing the Kubernetes resources")
+			clearNexusResources(endpointName)
+			clearOperatorResources()
+
+			By("removing the Temporal namespace")
+			removeTemporalNamespace(temporalNamespace)
+		})
+
+		// readyNamespace brings up a Connection and Namespace, and waits until
+		// Temporal will actually accept an endpoint targeting it.
+		readyNamespace := func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// The Service resolves the target namespace through a registry that
+			// lags a few seconds behind a fresh registration, so a one-shot CLI
+			// call has to wait it out. The operator retries through it.
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(temporalCLI("operator", "search-attribute", "list",
+					"-n", temporalNamespace, "-o", "json"))
+				g.Expect(err).NotTo(HaveOccurred(), "the namespace registry has not caught up yet")
+			}, 2*time.Minute).Should(Succeed())
+		}
+
+		It("should create an endpoint and remove it again", func() {
+			readyNamespace()
+
+			Expect(resourceName).NotTo(Equal(endpointName))
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReady(resourceName)).To(Equal("True"))
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+
+			By("confirming the Service holds it under the Temporal name and target")
+			described, found := describeTemporalNexusEndpoint(endpointName)
+			Expect(found).To(BeTrue())
+			Expect(described.Spec.Target.Worker.Namespace).To(Equal(temporalNamespace))
+			Expect(described.Spec.Target.Worker.TaskQueue).To(Equal(taskQueue))
+			Expect(temporalNexusEndpointExists(resourceName)).To(BeFalse(),
+				"the Kubernetes resource name must never reach Temporal")
+
+			By("recording the server-assigned ID as an observation")
+			Expect(nexusEndpointField(resourceName, "{.status.endpointId}")).
+				To(Equal(described.ID))
+
+			By("deleting the resource")
+			deleteNexusEndpointResource(resourceName)
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNexusEndpointExists(endpointName)).To(BeFalse())
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should adopt an existing endpoint and leave it behind", func() {
+			readyNamespace()
+
+			By("registering the endpoint outside the operator")
+			createTemporalNexusEndpoint(endpointName, temporalNamespace, taskQueue)
+
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReady(resourceName)).To(Equal("True"))
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Adopted"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(nexusEndpointOwnership(resourceName)).To(Equal("Adopted"))
+
+			By("leaving it behind when the resource goes")
+			deleteNexusEndpointResource(resourceName)
+
+			Expect(temporalNexusEndpointExists(endpointName)).To(BeTrue(),
+				"an adopted endpoint must survive its resource")
+		})
+
+		It("should move a drifted endpoint in place", func() {
+			readyNamespace()
+
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			before, found := describeTemporalNexusEndpoint(endpointName)
+			Expect(found).To(BeTrue())
+
+			By("changing the task queue")
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue+"-moved", "")
+
+			Eventually(func(g Gomega) {
+				described, ok := describeTemporalNexusEndpoint(endpointName)
+				g.Expect(ok).To(BeTrue())
+				g.Expect(described.Spec.Target.Worker.TaskQueue).To(Equal(taskQueue + "-moved"))
+			}, 3*time.Minute).Should(Succeed())
+
+			after, _ := describeTemporalNexusEndpoint(endpointName)
+			Expect(after.ID).To(Equal(before.ID),
+				"the endpoint keeps its identity, so callers resolving it are undisturbed")
+			Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+		})
+
+		It("should put back an endpoint deleted behind its back", func() {
+			readyNamespace()
+
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("removing the endpoint outside the operator")
+			removeTemporalNexusEndpoint(endpointName)
+			Expect(temporalNexusEndpointExists(endpointName)).To(BeFalse())
+
+			By("nudging the operator to reconcile")
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue+"-again", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNexusEndpointExists(endpointName)).To(BeTrue())
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"),
+				"restoring an endpoint must not change who may delete it")
+		})
+
+		It("should leave the endpoint behind when the policy is Orphan", func() {
+			readyNamespace()
+
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "Orphan")
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			deleteNexusEndpointResource(resourceName)
+
+			Expect(temporalNexusEndpointExists(endpointName)).To(BeTrue(),
+				"Orphan must leave the endpoint alone")
+		})
+
+		It("should hold its target namespace open until it goes", func() {
+			readyNamespace()
+
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// Temporal refuses to delete a namespace that a Nexus endpoint
+			// targets, so the Namespace resource cannot finish deleting while
+			// this endpoint exists. That is the Service enforcing the ordering,
+			// not the operator: the Namespace holds its finalizer and retries.
+			By("asking for the Namespace to be deleted")
+			beginNamespaceDeletion(temporalNamespace)
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("DeleteFailed"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(namespaceField(temporalNamespace, "{.metadata.finalizers}")).
+				To(ContainSubstring("temporal.simonemms.com/namespace"))
+			Expect(temporalNamespaceExists(temporalNamespace)).To(BeTrue())
+			Expect(temporalNexusEndpointExists(endpointName)).To(BeTrue())
+
+			By("deleting the endpoint, which unblocks the namespace")
+			deleteNexusEndpointResource(resourceName)
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceGone(temporalNamespace)).To(BeTrue())
+			}, 3*time.Minute).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNamespaceExists(temporalNamespace)).To(BeFalse())
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should react to its Namespace becoming Ready without waiting for the retry", func() {
+			applyConnectionSample()
+
+			By("creating the NexusEndpoint before its Namespace exists")
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue, "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReady(resourceName)).To(Equal("False"))
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("NamespaceNotFound"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("creating the Namespace it was waiting for")
+			applyNamespace(temporalNamespace, "36h")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// Measured on the dependency gate rather than on Ready=True: getting
+			// past the gate is the watch's doing, while what happens next waits
+			// on Temporal's namespace registry.
+			By("confirming it stops waiting on its Namespace promptly")
+			start := time.Now()
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReadyReason(resourceName)).NotTo(Equal("NamespaceNotFound"))
+			}, watchResponseWindow).Should(Succeed())
+
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"NexusEndpoint stopped waiting %s after its Namespace became Ready\n",
+				time.Since(start).Round(time.Millisecond))
+
+			By("confirming it goes on to create the endpoint")
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReady(resourceName)).To(Equal("True"))
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+	})
 })
 
 // applyConnectionSample applies the sample Connection and waits for it to become
@@ -1349,6 +1598,144 @@ func temporalSearchAttributeType(temporalNamespace, name string) string {
 	Expect(json.Unmarshal([]byte(output), &listed)).To(Succeed(), "Failed to parse the search attribute list")
 
 	return listed.CustomAttributes[name]
+}
+
+// applyNexusEndpoint applies a NexusEndpoint. resourceName is the Kubernetes
+// resource's name and temporalName is what Temporal is asked for.
+func applyNexusEndpoint(resourceName, temporalName, namespaceRef, taskQueue, deletionPolicy string) {
+	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+kind: NexusEndpoint
+metadata:
+  name: ` + resourceName + `
+spec:
+  name: ` + temporalName + `
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: ` + namespaceRef + `
+  taskQueue: ` + taskQueue + `
+`
+	if deletionPolicy != "" {
+		manifest += "  deletionPolicy: " + deletionPolicy + "\n"
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the NexusEndpoint")
+}
+
+// nexusEndpointField reads a jsonpath expression from the named NexusEndpoint.
+func nexusEndpointField(name, jsonPath string) string {
+	cmd := exec.Command("kubectl", "get", "tnx", name, "-n", "default", "-o", "jsonpath="+jsonPath)
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the NexusEndpoint")
+
+	return output
+}
+
+// nexusEndpointReady returns the status of the Ready condition.
+func nexusEndpointReady(name string) string {
+	return nexusEndpointField(name, "{.status.conditions[?(@.type=='Ready')].status}")
+}
+
+// nexusEndpointReadyReason returns the reason on the Ready condition.
+func nexusEndpointReadyReason(name string) string {
+	return nexusEndpointField(name, "{.status.conditions[?(@.type=='Ready')].reason}")
+}
+
+// nexusEndpointOwnership returns the persisted ownership.
+func nexusEndpointOwnership(name string) string {
+	return nexusEndpointField(name, "{.status.ownership}")
+}
+
+// deleteNexusEndpointResource removes a NexusEndpoint and waits for the
+// finalizer to let it go.
+func deleteNexusEndpointResource(name string) {
+	cmd := exec.Command("kubectl", "delete", "tnx", name, "-n", "default", "--wait=true", "--timeout=3m")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to delete the NexusEndpoint")
+}
+
+// temporalNexusEndpoint is the part of `temporal operator nexus endpoint get
+// -o json` output the specs assert on.
+type temporalNexusEndpoint struct {
+	ID   string `json:"id"`
+	Spec struct {
+		Name   string `json:"name"`
+		Target struct {
+			Worker struct {
+				Namespace string `json:"namespace"`
+				TaskQueue string `json:"taskQueue"`
+			} `json:"worker"`
+		} `json:"target"`
+	} `json:"spec"`
+}
+
+// describeTemporalNexusEndpoint asks the Temporal Service about an endpoint,
+// reporting whether it is registered at all.
+func describeTemporalNexusEndpoint(name string) (temporalNexusEndpoint, bool) {
+	output, err := utils.Run(temporalCLI("operator", "nexus", "endpoint", "get", "--name", name, "-o", "json"))
+	if err != nil {
+		return temporalNexusEndpoint{}, false
+	}
+
+	var described temporalNexusEndpoint
+	Expect(json.Unmarshal([]byte(output), &described)).To(Succeed(), "Failed to parse the endpoint")
+
+	return described, described.Spec.Name == name
+}
+
+// temporalNexusEndpointExists reports whether the Service still knows about an
+// endpoint.
+func temporalNexusEndpointExists(name string) bool {
+	_, found := describeTemporalNexusEndpoint(name)
+
+	return found
+}
+
+// createTemporalNexusEndpoint registers an endpoint directly on the Service,
+// standing in for one that pre-dates the operator.
+func createTemporalNexusEndpoint(name, namespace, taskQueue string) {
+	Eventually(func(g Gomega) {
+		_, err := utils.Run(temporalCLI("operator", "nexus", "endpoint", "create",
+			"--name", name, "--target-namespace", namespace, "--target-task-queue", taskQueue))
+		g.Expect(err).NotTo(HaveOccurred(), "Failed to create the Temporal Nexus endpoint")
+	}, 2*time.Minute).Should(Succeed())
+}
+
+// removeTemporalNexusEndpoint clears up an endpoint that outlived its resource.
+// Temporal refuses to delete a namespace while an endpoint targets it, so this
+// has to happen before the namespace is cleaned up.
+func removeTemporalNexusEndpoint(name string) {
+	Eventually(func(g Gomega) {
+		if !temporalNexusEndpointExists(name) {
+			return
+		}
+
+		_, _ = utils.Run(temporalCLI("operator", "nexus", "endpoint", "delete", "--name", name))
+
+		g.Expect(temporalNexusEndpointExists(name)).To(BeFalse(), "The Nexus endpoint should have gone")
+	}, 2*time.Minute).Should(Succeed())
+}
+
+// clearNexusResources removes every NexusEndpoint in the test namespace and any
+// Temporal endpoint left behind, before the namespaces they target are touched.
+func clearNexusResources(endpointName string) {
+	cmd := exec.Command("kubectl", "delete", "tnx", "--all",
+		"-n", "default", "--wait=true", "--timeout=3m")
+	if _, err := utils.Run(cmd); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "NexusEndpoint cleanup stalled, stripping finalizers: %s\n", err)
+
+		cmd = exec.Command("kubectl", "patch", "tnx", "--all", "-n", "default",
+			"--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+		_, _ = utils.Run(cmd)
+	}
+
+	removeTemporalNexusEndpoint(endpointName)
 }
 
 // temporalNamespaceDescription is the part of `temporal operator namespace

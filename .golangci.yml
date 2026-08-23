@@ -64,6 +64,12 @@ linters:
       - linters:
           - funlen
         path: _test\.go
+      # Each resource's suite sets up its own fixtures. They look alike because
+      # the resources behave alike, and sharing them would couple the suites
+      # together for no gain.
+      - linters:
+          - dupl
+        path: _test\.go
       - linters:
           - staticcheck
         text: "ST1001"

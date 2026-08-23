@@ -1,4 +1,4 @@
-# app - AI Agent Guide
+# temporal-resource-operator - AI Agent Guide
 
 ## Project Structure
 

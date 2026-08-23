@@ -255,6 +255,7 @@ type SearchAttributeStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=tsa
+// +kubebuilder:printcolumn:name="Attribute",type=string,JSONPath=".spec.name"
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=".spec.type"
 // +kubebuilder:printcolumn:name="Temporal NS",type=string,JSONPath=".spec.namespaceRef.name"
 // +kubebuilder:printcolumn:name="Ownership",type=string,JSONPath=".status.ownership"

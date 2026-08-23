@@ -1,0 +1,25 @@
+# Created by the operator - if this is deleted, the Nexus endpoint is removed
+# from the Temporal Service.
+#
+# metadata.name is Kubernetes identity; spec.name is what Temporal is asked for.
+# Nexus endpoint names are unique across the whole Service, not per namespace.
+apiVersion: temporal.simonemms.com/v1alpha1
+kind: NexusEndpoint
+metadata:
+  labels:
+    app.kubernetes.io/name: temporal-resource-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: payments-nexus
+spec:
+  name: PaymentsNexus
+  connectionRef:
+    name: connection-sample
+  # The endpoint routes requests to this namespace and task queue. Temporal
+  # refuses to create an endpoint whose target namespace does not exist, so the
+  # Namespace has to be Ready first.
+  namespaceRef:
+    name: namespace-sample
+  taskQueue: payments-nexus
+  # Delete is the default. Set it to Orphan to leave the endpoint behind when
+  # this resource is deleted.
+  deletionPolicy: Delete

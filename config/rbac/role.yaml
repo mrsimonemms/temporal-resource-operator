@@ -23,6 +23,7 @@ rules:
   resources:
   - connections/status
   - namespaces/status
+  - nexusendpoints/status
   - searchattributes/status
   verbs:
   - get
@@ -32,6 +33,7 @@ rules:
   - temporal.simonemms.com
   resources:
   - namespaces
+  - nexusendpoints
   - searchattributes
   verbs:
   - get
@@ -43,6 +45,7 @@ rules:
   - temporal.simonemms.com
   resources:
   - namespaces/finalizers
+  - nexusendpoints/finalizers
   - searchattributes/finalizers
   verbs:
   - update
