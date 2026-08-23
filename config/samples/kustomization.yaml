@@ -2,4 +2,5 @@
 resources:
 - temporal_v1alpha1_connection.yaml
 - temporal_v1alpha1_namespace.yaml
+- temporal_v1alpha1_searchattribute.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

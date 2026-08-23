@@ -424,6 +424,11 @@ func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bo
 
 // finalise runs the deletion flow: remove the Temporal namespace if this
 // resource owns it and has been asked to, then release the finalizer.
+//
+// The SearchAttribute controller's finalise mirrors this step by step on
+// purpose; see the note there for why the two are not folded together.
+//
+//nolint:dupl // mirrored by SearchAttribute.finalise on purpose
 func (r *NamespaceReconciler) finalise(
 	ctx context.Context,
 	ns *temporalv1alpha1.Namespace,

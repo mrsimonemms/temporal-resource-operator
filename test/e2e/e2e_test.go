@@ -779,6 +779,250 @@ spec:
 			Expect(err.Error()).To(ContainSubstring("connectionRef.name is required"))
 		})
 	})
+
+	Context("SearchAttribute", func() {
+		var (
+			temporalNamespace string
+			resourceName      string
+			attributeName     string
+		)
+
+		BeforeEach(func() {
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), CurrentSpecReport().LineNumber())
+			temporalNamespace = "e2e-sa-ns-" + suffix
+			// The Kubernetes resource is named the way Kubernetes insists;
+			// the Temporal attribute is named the way real ones are. Keeping
+			// them different is the point of these specs.
+			resourceName = "customer-id-" + suffix
+			attributeName = "CustomerId" + strings.ReplaceAll(suffix, "-", "")
+
+			By("removing anything an earlier spec left behind")
+			clearOperatorResources()
+
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Available",
+				"deployment/temporal", "-n", "temporal", "--timeout=5m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
+		})
+
+		AfterEach(func() {
+			By("removing the Kubernetes resources")
+			cmd := exec.Command("kubectl", "delete", "tsa", "--all",
+				"-n", "default", "--wait=true", "--timeout=3m")
+			if _, err := utils.Run(cmd); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "SearchAttribute cleanup stalled, stripping finalizers: %s\n", err)
+
+				cmd = exec.Command("kubectl", "patch", "tsa", "--all", "-n", "default",
+					"--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+				_, _ = utils.Run(cmd)
+			}
+			clearOperatorResources()
+
+			// Removing the Temporal namespace takes its search attributes with
+			// it, which is the tidiest way to clean up an orphaned one.
+			By("removing the Temporal namespace")
+			removeTemporalNamespace(temporalNamespace)
+		})
+
+		// readyNamespace brings up a Connection and Namespace for the spec, and
+		// waits until search attribute calls against it actually resolve.
+		//
+		// A Ready Namespace is not quite enough: the Service answers describe
+		// from storage but resolves search attribute calls through a namespace
+		// registry that lags a few seconds behind a fresh registration, so
+		// asking too early gets "namespace not found". The operator retries
+		// through that; a test issuing one-shot CLI calls has to wait it out.
+		readyNamespace := func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(temporalCLI("operator", "search-attribute", "list",
+					"-n", temporalNamespace, "-o", "json"))
+				g.Expect(err).NotTo(HaveOccurred(), "the namespace registry has not caught up yet")
+			}, 2*time.Minute).Should(Succeed())
+		}
+
+		It("should register a search attribute it creates", func() {
+			readyNamespace()
+
+			Expect(resourceName).NotTo(Equal(attributeName),
+				"the two names must differ for these specs to prove anything")
+
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "Keyword", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReady(resourceName)).To(Equal("True"))
+				g.Expect(searchAttributeReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(searchAttributeOwnership(resourceName)).To(Equal("Created"))
+
+			By("registering the Temporal name, not the Kubernetes one")
+			Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).
+				To(Equal("INDEXED_VALUE_TYPE_KEYWORD"))
+			Expect(temporalSearchAttributeType(temporalNamespace, resourceName)).To(BeEmpty(),
+				"the Kubernetes resource name must never reach Temporal")
+
+			By("refusing to retarget the resource at something else")
+			cmd := exec.Command("kubectl", "patch", "tsa", resourceName, "-n", "default",
+				"--type=merge", "-p", `{"spec":{"name":"SomethingElse"}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "spec.name must be immutable")
+			Expect(err.Error()).To(ContainSubstring("name is immutable"))
+
+			By("removing it again when the resource goes")
+			deleteSearchAttribute(resourceName)
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).To(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should adopt a search attribute that already exists", func() {
+			readyNamespace()
+
+			By("registering a mixed-case attribute outside the operator")
+			createTemporalSearchAttribute(temporalNamespace, attributeName, "KeywordList")
+			Expect(attributeName).To(MatchRegexp(`^CustomerId`),
+				"the attribute Temporal holds is PascalCase, as real ones are")
+
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "KeywordList", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReady(resourceName)).To(Equal("True"))
+				g.Expect(searchAttributeReadyReason(resourceName)).To(Equal("Adopted"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(searchAttributeOwnership(resourceName)).To(Equal("Adopted"))
+
+			By("leaving it behind when the resource goes")
+			deleteSearchAttribute(resourceName)
+
+			Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).
+				To(Equal("INDEXED_VALUE_TYPE_KEYWORD_LIST"), "an adopted attribute must survive its resource")
+		})
+
+		It("should refuse a search attribute of a different type", func() {
+			readyNamespace()
+
+			By("registering a Keyword attribute outside the operator")
+			createTemporalSearchAttribute(temporalNamespace, attributeName, "Keyword")
+
+			By("asking for the same name as Text")
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "Text", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReady(resourceName)).To(Equal("False"))
+				g.Expect(searchAttributeReadyReason(resourceName)).To(Equal("TypeConflict"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(searchAttributeOwnership(resourceName)).To(BeEmpty(),
+				"a conflicting attribute is neither created nor adopted")
+			Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).
+				To(Equal("INDEXED_VALUE_TYPE_KEYWORD"), "the existing attribute must not be retyped")
+		})
+
+		It("should leave the attribute behind when the policy is Orphan", func() {
+			readyNamespace()
+
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "Int", "Orphan")
+
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+			Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).
+				To(Equal("INDEXED_VALUE_TYPE_INT"))
+
+			deleteSearchAttribute(resourceName)
+
+			Expect(temporalSearchAttributeType(temporalNamespace, attributeName)).
+				To(Equal("INDEXED_VALUE_TYPE_INT"), "Orphan must leave the attribute alone")
+		})
+
+		It("should finalise when the Temporal namespace has already gone", func() {
+			readyNamespace()
+
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "Keyword", "")
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeOwnership(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// Arrange the teardown order deterministically rather than racing
+			// the two controllers: with the operator stopped, take the Temporal
+			// namespace away underneath the search attribute.
+			By("stopping the operator")
+			stopControllerManager()
+
+			By("deleting the Temporal namespace, taking its search attributes with it")
+			_, err := utils.Run(temporalCLI("operator", "namespace", "delete",
+				"-n", temporalNamespace, "--yes"))
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the Temporal namespace")
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNamespaceExists(temporalNamespace)).To(BeFalse())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("removing the Namespace resource so the operator does not put it back")
+			removeNamespaceFinalizer(temporalNamespace)
+			deleteNamespace(temporalNamespace)
+
+			By("restarting the operator")
+			startControllerManager()
+
+			By("deleting the SearchAttribute")
+			deleteSearchAttribute(resourceName)
+
+			Expect(searchAttributeGone(resourceName)).To(BeTrue(),
+				"a search attribute cannot outlive the namespace holding it, so deletion is already satisfied")
+		})
+
+		It("should react to its Namespace becoming Ready without waiting for the retry", func() {
+			applyConnectionSample()
+
+			By("creating the SearchAttribute before its Namespace exists")
+			applySearchAttribute(resourceName, attributeName, temporalNamespace, "Keyword", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReady(resourceName)).To(Equal("False"))
+				g.Expect(searchAttributeReadyReason(resourceName)).To(Equal("NamespaceNotFound"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("creating the Namespace it was waiting for")
+			applyNamespace(temporalNamespace, "36h")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// Timed from the moment the Namespace reports Ready, and measured on
+			// the dependency gate rather than on Ready=True. Getting past the
+			// gate is the watch's doing; what happens next depends on Temporal's
+			// namespace registry catching up, which is its own few seconds and
+			// nothing to do with whether the wake-up worked.
+			//
+			// The window is a third of the fallback retry, so clearing the gate
+			// inside it cannot be the timer's doing.
+			By("confirming the SearchAttribute stops waiting on its Namespace promptly")
+			start := time.Now()
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReadyReason(resourceName)).NotTo(Equal("NamespaceNotFound"))
+			}, watchResponseWindow).Should(Succeed())
+
+			_, _ = fmt.Fprintf(GinkgoWriter,
+				"SearchAttribute stopped waiting %s after its Namespace became Ready\n",
+				time.Since(start).Round(time.Millisecond))
+
+			By("confirming it goes on to register the attribute")
+			Eventually(func(g Gomega) {
+				g.Expect(searchAttributeReady(resourceName)).To(Equal("True"))
+				g.Expect(searchAttributeReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+	})
 })
 
 // applyConnectionSample applies the sample Connection and waits for it to become
@@ -1006,6 +1250,105 @@ func temporalNamespaceExists(name string) bool {
 // retention in its JSON output.
 func retentionSeconds(hours int) string {
 	return fmt.Sprintf("%ds", hours*3600)
+}
+
+// applySearchAttribute applies a SearchAttribute. resourceName is the
+// Kubernetes resource's name and temporalName is what Temporal is asked for -
+// deliberately different, because that is the distinction the API exists to
+// draw. An empty deletionPolicy is left out so the CRD default applies.
+func applySearchAttribute(resourceName, temporalName, namespaceRef, attrType, deletionPolicy string) {
+	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+kind: SearchAttribute
+metadata:
+  name: ` + resourceName + `
+spec:
+  name: ` + temporalName + `
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: ` + namespaceRef + `
+  type: ` + attrType + `
+`
+	if deletionPolicy != "" {
+		manifest += "  deletionPolicy: " + deletionPolicy + "\n"
+	}
+
+	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the SearchAttribute")
+}
+
+// searchAttributeField reads a jsonpath expression from the named
+// SearchAttribute.
+func searchAttributeField(name, jsonPath string) string {
+	cmd := exec.Command("kubectl", "get", "tsa", name, "-n", "default", "-o", "jsonpath="+jsonPath)
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to read the SearchAttribute")
+
+	return output
+}
+
+// searchAttributeReady returns the status of the named SearchAttribute's Ready
+// condition.
+func searchAttributeReady(name string) string {
+	return searchAttributeField(name, "{.status.conditions[?(@.type=='Ready')].status}")
+}
+
+// searchAttributeReadyReason returns the reason on the Ready condition.
+func searchAttributeReadyReason(name string) string {
+	return searchAttributeField(name, "{.status.conditions[?(@.type=='Ready')].reason}")
+}
+
+// searchAttributeOwnership returns the persisted ownership.
+func searchAttributeOwnership(name string) string {
+	return searchAttributeField(name, "{.status.ownership}")
+}
+
+// searchAttributeGone reports whether the SearchAttribute has left the API
+// server.
+func searchAttributeGone(name string) bool {
+	cmd := exec.Command("kubectl", "get", "tsa", name, "-n", "default")
+
+	_, err := utils.Run(cmd)
+
+	return err != nil
+}
+
+// deleteSearchAttribute removes a SearchAttribute and waits for the finalizer
+// to let it go.
+func deleteSearchAttribute(name string) {
+	cmd := exec.Command("kubectl", "delete", "tsa", name, "-n", "default", "--wait=true", "--timeout=3m")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to delete the SearchAttribute")
+}
+
+// createTemporalSearchAttribute registers a search attribute directly on the
+// Temporal Service, standing in for one that pre-dates the operator.
+func createTemporalSearchAttribute(temporalNamespace, name, attrType string) {
+	_, err := utils.Run(temporalCLI("operator", "search-attribute", "create",
+		"-n", temporalNamespace, "--name", name, "--type", attrType))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the Temporal search attribute")
+}
+
+// temporalSearchAttributeType returns the Temporal enum name of a registered
+// custom search attribute, or an empty string when it is not registered.
+func temporalSearchAttributeType(temporalNamespace, name string) string {
+	output, err := utils.Run(temporalCLI("operator", "search-attribute", "list",
+		"-n", temporalNamespace, "-o", "json"))
+	if err != nil {
+		return ""
+	}
+
+	var listed struct {
+		CustomAttributes map[string]string `json:"customAttributes"`
+	}
+	Expect(json.Unmarshal([]byte(output), &listed)).To(Succeed(), "Failed to parse the search attribute list")
+
+	return listed.CustomAttributes[name]
 }
 
 // temporalNamespaceDescription is the part of `temporal operator namespace
