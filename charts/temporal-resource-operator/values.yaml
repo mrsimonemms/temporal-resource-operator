@@ -1,0 +1,65 @@
+# Number of controller manager replicas. Leader election is always enabled, so
+# only one replica reconciles at a time; extra replicas are warm standbys.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mrsimonemms/temporal-resource-operator
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Create a ServiceAccount for the controller manager.
+  create: true
+  # Name to use. Defaults to the fullname template when create is true, and to
+  # "default" when create is false.
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Pod-level security context. The operator runs unprivileged.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security context for the manager.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# controller-runtime metrics. When enabled the manager serves HTTPS metrics
+# protected by Kubernetes authn/authz, which is what the extra ClusterRoles
+# below are for. Disabling this switches the metrics endpoint off entirely.
+metrics:
+  enabled: true
+  port: 8443
+  service:
+    type: ClusterIP
+    annotations: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+priorityClassName: ""
+
+terminationGracePeriodSeconds: 10

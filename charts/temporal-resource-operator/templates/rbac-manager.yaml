@@ -1,0 +1,69 @@
+# The operator's own permissions. Kept in step with config/rbac/role.yaml,
+# which controller-gen generates from the +kubebuilder:rbac markers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-manager
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+  - apiGroups:
+      - temporal.simonemms.com
+    resources:
+      - connections
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - temporal.simonemms.com
+    resources:
+      - connections/status
+      - namespaces/status
+      - nexusendpoints/status
+      - searchattributes/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - temporal.simonemms.com
+    resources:
+      - namespaces
+      - nexusendpoints
+      - searchattributes
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - temporal.simonemms.com
+    resources:
+      - namespaces/finalizers
+      - nexusendpoints/finalizers
+      - searchattributes/finalizers
+    verbs:
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-manager
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "temporal-resource-operator.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "temporal-resource-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

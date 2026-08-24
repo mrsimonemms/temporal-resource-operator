@@ -1,0 +1,46 @@
+suite: metrics service
+templates:
+  - service-metrics.yaml
+release:
+  name: temporal-resource-operator
+  namespace: temporal-resource-operator-system
+tests:
+  - it: exposes the metrics port and selects the controller pods
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: temporal-resource-operator-metrics
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0]
+          value:
+            name: https
+            port: 8443
+            protocol: TCP
+            targetPort: metrics
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: temporal-resource-operator
+            app.kubernetes.io/instance: temporal-resource-operator
+
+  - it: follows a custom metrics port
+    set:
+      metrics:
+        port: 9443
+    asserts:
+      - equal:
+          path: spec.ports[0].port
+          value: 9443
+
+  - it: disappears when metrics are disabled
+    set:
+      metrics:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

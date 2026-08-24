@@ -10,10 +10,12 @@ A Kubernetes operator for declaratively managing resources in an existing
 
 * [What it does](#what-it-does)
 * [What it does not do](#what-it-does-not-do)
+  * [How is this different from temporal-operator?](#how-is-this-different-from-temporal-operator)
 * [Supported resources](#supported-resources)
 * [Installation](#installation)
   * [Prerequisites](#prerequisites)
-  * [Install the operator](#install-the-operator)
+  * [Install with Helm](#install-with-helm)
+  * [Install from source](#install-from-source)
   * [Generate a single install manifest](#generate-a-single-install-manifest)
   * [Uninstall](#uninstall)
 * [Quick start](#quick-start)
@@ -98,6 +100,21 @@ Service's gRPC endpoint like any other Temporal client.
 
 If you need something to deploy Temporal itself, this is the wrong tool.
 
+### How is this different from temporal-operator?
+
+[alexandrevilain/temporal-operator](https://github.com/alexandrevilain/temporal-operator)
+is primarily a Kubernetes operator for deploying and operating Temporal clusters,
+including their persistence, services, upgrades and supporting infrastructure.
+
+`temporal-resource-operator` starts one level higher: it assumes the Temporal
+Service already exists — whether that is Temporal Cloud or a self-hosted
+cluster — and manages resources inside it, such as Namespaces, Search
+Attributes and Nexus Endpoints.
+
+There is some overlap around Namespace management, but the two projects solve
+different problems and can be complementary: one can operate the Temporal
+cluster while this operator manages resources within it.
+
 ## Supported resources
 
 All resources are namespaced and live in the `temporal.simonemms.com/v1alpha1`
@@ -119,19 +136,53 @@ Kubernetes namespace.
 
 * A Kubernetes cluster and `kubectl` configured against it
 * A reachable Temporal Service (Temporal Cloud or self-hosted)
-* `make` and `git`, because installation is currently driven from the
-  repository
+* Helm 4
 
 Container images are published to the GitHub Container Registry as
 `ghcr.io/mrsimonemms/temporal-resource-operator`. Tagged releases are built for
 `linux/amd64` and `linux/arm64`; commits on `main` are published as
 `linux/amd64` under their commit SHA.
 
-There is no Helm chart and no pre-built `install.yaml` attached to releases
-yet, so installation means cloning the repository and using the Makefile
-targets below. See [Limitations](#limitations).
+The Helm chart is published beside them, as an OCI artifact at
+`ghcr.io/mrsimonemms/charts/temporal-resource-operator`. Chart versions drop the
+leading `v`, so the chart matching image `v0.1.0` is chart `0.1.0`, and that
+image is what the chart installs by default.
 
-### Install the operator
+### Install with Helm
+
+Helm is the recommended way to install the operator:
+
+```sh
+helm install temporal-resource-operator \
+  oci://ghcr.io/mrsimonemms/charts/temporal-resource-operator \
+  --version <version> \
+  --namespace temporal-resource-operator-system \
+  --create-namespace
+```
+
+Charts are published from release tags only, so `<version>` is a released
+[chart version](https://github.com/mrsimonemms/temporal-resource-operator/pkgs/container/charts%2Ftemporal-resource-operator).
+
+The namespace is a convention rather than a requirement — the chart installs
+into whichever namespace you give it. It installs the four CRDs, the controller
+Deployment, its ServiceAccount and RBAC, and an HTTPS metrics Service. It does
+not install Temporal, and it creates no Temporal resources of its own.
+
+```sh
+kubectl -n temporal-resource-operator-system \
+  rollout status deployment/temporal-resource-operator
+kubectl -n temporal-resource-operator-system \
+  logs deployment/temporal-resource-operator -f
+```
+
+Values, upgrade instructions and the CRD caveat that comes with Helm are in the
+[chart README](charts/temporal-resource-operator/README.md).
+
+### Install from source
+
+The Makefile drives a Kustomize install from a clone. This is the development
+path — use it when working on the operator, or when you want the install to
+track your working tree rather than a release:
 
 ```sh
 git clone https://github.com/mrsimonemms/temporal-resource-operator.git
@@ -174,9 +225,23 @@ releases them, so remove the resources **before** the operator:
 
 ```sh
 kubectl delete tnx,tsa,tns,connections --all --all-namespaces
+```
+
+Then remove the operator, whichever way you installed it:
+
+```sh
+# Helm
+helm uninstall temporal-resource-operator \
+  --namespace temporal-resource-operator-system
+
+# From source
 make undeploy    # remove the controller manager and RBAC
 make uninstall   # remove the CRDs
 ```
+
+`helm uninstall` deliberately leaves the CRDs behind, because deleting a CRD
+deletes every resource of that kind. Remove them explicitly when you mean it —
+see the [chart README](charts/temporal-resource-operator/README.md).
 
 Anything with `deletionPolicy: Delete` has its Temporal object removed as part
 of that first step, so patch the policy to `Orphan` first if you want the
@@ -189,9 +254,9 @@ the finalizers by hand.
 
 ## Quick start
 
-This walks through a `Connection`, a `Namespace`, and verifying the result. The
-names used here (`production`, `payments`) carry through the rest of this
-document.
+This walks through all four resources and verifies the resulting objects in
+Temporal. The names used here (`production`, `payments`) carry through the rest
+of this document.
 
 ### 1. Describe the Temporal Service
 
@@ -933,9 +998,9 @@ The operator does not run or manage Temporal in either case.
 
 * The operator manages resources inside an existing Temporal Service. It does
   not install or operate the Service itself.
-* Installation currently requires cloning this repository and using its
-  Makefile targets. There is no Helm chart, and no pre-built install manifest
-  is attached to releases.
+* CRDs shipped through Helm's `crds/` mechanism are installed if absent, but
+  Helm does not upgrade or remove them. A release that changes a CRD therefore
+  needs the new definitions applied separately.
 * `SearchAttribute` and `NexusEndpoint` ownership is controller bookkeeping,
   not externally verifiable, because Temporal exposes no ownership metadata for
   either. Only `Namespace` ownership can be re-checked against Temporal.

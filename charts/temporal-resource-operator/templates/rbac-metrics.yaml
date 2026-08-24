@@ -1,0 +1,51 @@
+{{- if .Values.metrics.enabled }}
+# The metrics endpoint is served over HTTPS and gated by TokenReview and
+# SubjectAccessReview, so the manager needs to be able to create both.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-metrics-auth
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-metrics-auth
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "temporal-resource-operator.fullname" . }}-metrics-auth
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "temporal-resource-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Bind this to whatever scrapes the endpoint - it grants nothing by itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-metrics-reader
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+{{- end }}

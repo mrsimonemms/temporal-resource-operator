@@ -1,0 +1,21 @@
+{{ include "temporal-resource-operator.fullname" . }} is installed in namespace {{ .Release.Namespace }}.
+
+Check the controller is running:
+
+  kubectl -n {{ .Release.Namespace }} rollout status \
+    deployment/{{ include "temporal-resource-operator.fullname" . }}
+
+The operator manages resources inside a Temporal Service that already exists.
+Point it at one by creating a Connection, then the resources that reference it:
+
+  kubectl get connections
+  kubectl get tns   # Temporal Namespaces
+  kubectl get tsa   # Search Attributes
+  kubectl get tnx   # Nexus Endpoints
+
+Custom resource schemas and lifecycle documentation:
+
+  https://github.com/mrsimonemms/temporal-resource-operator#readme
+
+Note: Helm installs CRDs on first install only. It does not upgrade or remove
+them. See the chart README before upgrading across a CRD change.

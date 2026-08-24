@@ -1,0 +1,215 @@
+suite: controller deployment
+templates:
+  - deployment.yaml
+release:
+  name: temporal-resource-operator
+  namespace: temporal-resource-operator-system
+tests:
+  - it: names the Deployment after the chart without doubling it up
+    asserts:
+      - equal:
+          path: metadata.name
+          value: temporal-resource-operator
+      - equal:
+          path: metadata.namespace
+          value: temporal-resource-operator-system
+
+  - it: installs into the release namespace rather than a fixed one
+    release:
+      name: temporal-resource-operator
+      namespace: somewhere-else
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: somewhere-else
+
+  - it: prefixes the release name when it does not contain the chart name
+    release:
+      name: tro
+      namespace: temporal-resource-operator-system
+    asserts:
+      - equal:
+          path: metadata.name
+          value: tro-temporal-resource-operator
+
+  - it: honours fullnameOverride
+    set:
+      fullnameOverride: operator
+    asserts:
+      - equal:
+          path: metadata.name
+          value: operator
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: operator
+
+  - it: honours nameOverride in the selector labels
+    set:
+      nameOverride: tro
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: tro
+
+  - it: defaults the image tag to the chart appVersion
+    chart:
+      version: 0.1.0
+      appVersion: v0.1.0
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/mrsimonemms/temporal-resource-operator:v0.1.0
+      - equal:
+          path: metadata.labels["helm.sh/chart"]
+          value: temporal-resource-operator-0.1.0
+      - equal:
+          path: metadata.labels["app.kubernetes.io/version"]
+          value: v0.1.0
+
+  - it: lets image.tag override the appVersion
+    chart:
+      version: 0.1.0
+      appVersion: v0.1.0
+    set:
+      image:
+        repository: example.com/temporal-resource-operator
+        tag: chart-smoke
+        pullPolicy: Never
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: example.com/temporal-resource-operator:chart-smoke
+      - equal:
+          path: spec.template.spec.containers[0].imagePullPolicy
+          value: Never
+
+  - it: uses the named ServiceAccount when the chart does not create one
+    set:
+      serviceAccount:
+        create: false
+        name: existing-sa
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: existing-sa
+
+  - it: sets the replica count
+    set:
+      replicaCount: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+
+  - it: always enables leader election
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --leader-elect
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --health-probe-bind-address=:8081
+
+  - it: serves metrics by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-bind-address=:8443
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8443
+            protocol: TCP
+
+  - it: drops the metrics arg and port when metrics are disabled
+    set:
+      metrics:
+        enabled: false
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-bind-address=:8443
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+
+  - it: honours a custom metrics port
+    set:
+      metrics:
+        port: 9443
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-bind-address=:9443
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9443
+            protocol: TCP
+
+  - it: runs unprivileged
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+  - it: keeps the health probes wired to the health port
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+          value:
+            path: /healthz
+            port: health
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          value:
+            path: /readyz
+            port: health
+
+  - it: applies scheduling and resource overrides
+    set:
+      priorityClassName: system-cluster-critical
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      imagePullSecrets:
+        - name: ghcr
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: system-cluster-critical
+      - equal:
+          path: spec.template.spec.nodeSelector["kubernetes.io/os"]
+          value: linux
+      - equal:
+          path: spec.template.spec.tolerations[0].key
+          value: node-role.kubernetes.io/control-plane
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 100m
+      - equal:
+          path: spec.template.spec.imagePullSecrets[0].name
+          value: ghcr

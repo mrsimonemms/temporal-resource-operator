@@ -191,6 +191,82 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Helm
+
+# The chart is the public installation method. Its CRDs are copies of the
+# controller-gen output in config/crd/bases - "helm-sync" refreshes them and
+# "helm-check" fails if they have drifted.
+CHART_DIR ?= charts/temporal-resource-operator
+CHART_CRD_DIR ?= $(CHART_DIR)/crds
+CHART_DIST ?= dist/charts
+CHART_RELEASE ?= temporal-resource-operator
+CHART_NAMESPACE ?= temporal-resource-operator-system
+# Extra arguments for helm package, used by CI to stamp a release version:
+# make helm-package HELM_PACKAGE_ARGS="--version 0.1.0 --app-version v0.1.0"
+HELM_PACKAGE_ARGS ?=
+
+.PHONY: helm-sync
+helm-sync: manifests ## Copy the generated CRDs into the Helm chart.
+	@mkdir -p "$(CHART_CRD_DIR)"
+	@rm -f "$(CHART_CRD_DIR)"/*.yaml
+	@cp config/crd/bases/*.yaml "$(CHART_CRD_DIR)/"
+	@echo "Synced $(CHART_CRD_DIR) from config/crd/bases"
+
+.PHONY: helm-check
+helm-check: manifests helm-sync ## Verify the chart CRDs are byte-identical to the generated CRDs.
+	@diff -ru config/crd/bases "$(CHART_CRD_DIR)" || { \
+		echo "Chart CRDs have drifted from config/crd/bases; run 'make helm-sync'" >&2; \
+		exit 1; \
+	}
+	@echo "Chart CRDs are in sync with config/crd/bases"
+
+.PHONY: helm-lint
+helm-lint: helm-check ## Lint the Helm chart.
+	"$(HELM)" lint "$(CHART_DIR)"
+
+.PHONY: helm-template
+helm-template: ## Render the Helm chart with defaults, then with representative overrides.
+	"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(CHART_NAMESPACE)" --include-crds
+	@echo "Rendering representative overrides"
+	@"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(CHART_NAMESPACE)" --include-crds \
+		--set replicaCount=2 \
+		--set image.repository=example.com/temporal-resource-operator \
+		--set image.tag=chart-smoke \
+		--set resources.requests.cpu=100m \
+		--set resources.limits.memory=256Mi >/dev/null
+	@"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" \
+		--namespace "$(CHART_NAMESPACE)" --include-crds \
+		--set fullnameOverride=operator \
+		--set serviceAccount.create=false \
+		--set serviceAccount.name=existing-sa \
+		--set metrics.enabled=false >/dev/null
+	@"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" \
+		--namespace another-namespace --include-crds \
+		--set nameOverride=tro \
+		--set priorityClassName=system-cluster-critical >/dev/null
+	@echo "All override permutations rendered"
+
+.PHONY: helm-unittest
+helm-unittest: ## Run the Helm chart unit tests (needs the helm-unittest plugin).
+	"$(HELM)" unittest "$(CHART_DIR)"
+
+.PHONY: helm-package
+helm-package: helm-check ## Package the Helm chart into $(CHART_DIST).
+	@mkdir -p "$(CHART_DIST)"
+	"$(HELM)" package "$(CHART_DIR)" --destination "$(CHART_DIST)" $(HELM_PACKAGE_ARGS)
+
+.PHONY: helm-test
+helm-test: helm-lint helm-unittest helm-template helm-package ## Run every offline Helm check.
+
+.PHONY: helm-smoke
+helm-smoke: ## Install the chart into the current Kind cluster and check it works.
+	KIND="$(KIND)" KIND_CLUSTER="$(KIND_CLUSTER)" HELM="$(HELM)" \
+		KUBECTL="$(KUBECTL)" CHART_DIR="$(CHART_DIR)" \
+		CHART_RELEASE="$(CHART_RELEASE)" CHART_NAMESPACE="$(CHART_NAMESPACE)" \
+		CONTAINER_TOOL="$(CONTAINER_TOOL)" ./hack/helm-smoke.sh
+
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -201,6 +277,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KIND ?= kind
+HELM ?= helm
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
