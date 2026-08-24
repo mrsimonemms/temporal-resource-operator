@@ -17,6 +17,7 @@
 package v1beta1
 
 import (
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,14 @@ import (
 // Go so that an object built in memory behaves the same as one that has been
 // through admission.
 const DefaultRetention = 72 * time.Hour
+
+const (
+	// MinRetention is the shortest retention a Namespace may ask for.
+	MinRetention = 24 * time.Hour
+
+	// MaxRetention is the longest retention a Namespace may ask for.
+	MaxRetention = 90 * 24 * time.Hour
+)
 
 // NamespaceFinalizer holds a Namespace open until the operator has decided what
 // to do with the Temporal namespace it manages.
@@ -115,11 +124,29 @@ type NamespaceSpec struct {
 	// retention is how long the Temporal Service keeps a workflow execution's
 	// history after it closes. Defaults to 72h.
 	//
-	// Only the forms accepted by Go's time.ParseDuration work here, so "72h"
-	// rather than "3d".
+	// Written as a duration string. Go's units all work - "72h", "1h30m" - and
+	// so does a leading whole number of days, where one day is exactly 24
+	// hours: "7d", "1d12h", "7d30m".
+	//
+	// Must be between 1 and 90 days inclusive. The limit is on the duration,
+	// not on how it is written, so "1d", "24h" and "1440m" are all the minimum,
+	// and "90d" and "2160h" are both the maximum.
+	//
+	// The rules below work in whole seconds, because CEL has no way to turn an
+	// integer day count into a duration. They read the day count as a number,
+	// scale it, and add the seconds of whatever follows. getSeconds truncates,
+	// which can only ever under-count, so the maximum drops by a second when a
+	// non-zero sub-second component is present - that is what rejects "90d1ns"
+	// while still admitting "90d0ns". They rely on the syntax pattern for two
+	// things: that "d" appears only as the day unit, and that at most one day
+	// component is present.
 	// +optional
 	// +kubebuilder:default="72h"
-	Retention *metav1.Duration `json:"retention,omitempty"`
+	// +kubebuilder:validation:XValidation:rule=`(self.contains('d')?int(self.split('d')[0])*86400+duration(self.split('d')[1]==''?'0s':self.split('d')[1]).getSeconds():duration(self).getSeconds()) >= 86400`,message=`retention must be at least 1 day (24h)`
+	// +kubebuilder:validation:XValidation:rule=`(self.contains('d')?int(self.split('d')[0])*86400+duration(self.split('d')[1]==''?'0s':self.split('d')[1]).getSeconds():duration(self).getSeconds()) <= (self.matches(r'[1-9][0-9]*(ns|us|µs|μs|ms)|\.[0-9]*[1-9]') ? 7775999 : 7776000)`,message=`retention must be at most 90 days (2160h)`
+	//
+	//nolint:lll // kubebuilder markers cannot be wrapped
+	Retention *Duration `json:"retention,omitempty"`
 
 	// deletionPolicy decides what happens to the Temporal namespace when this
 	// resource is deleted. Defaults to Delete.
@@ -140,14 +167,34 @@ type NamespaceSpec struct {
 	DeletionPolicy NamespaceDeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
-// RetentionDuration returns the requested retention, falling back to
-// DefaultRetention when it is unset or not positive.
-func (s NamespaceSpec) RetentionDuration() time.Duration {
-	if s.Retention == nil || s.Retention.Duration <= 0 {
-		return DefaultRetention
+// RetentionDuration returns the retention to apply.
+//
+// An omitted retention takes DefaultRetention, matching the CRD's default so
+// that an object built in memory behaves like one that has been through
+// admission. A retention that is present but outside MinRetention..MaxRetention
+// is an error rather than a fallback: a value the user wrote deliberately
+// should never be quietly replaced with something else.
+//
+// The range is checked here as well as by the CRD because the CRD only guards
+// writes. An object stored before the range existed still decodes - decoding
+// must never fail, or one bad object would break every typed list of Namespaces
+// and the informer behind it - so the controller asks this and reports the
+// problem instead.
+func (s NamespaceSpec) RetentionDuration() (time.Duration, error) {
+	if s.Retention == nil {
+		return DefaultRetention, nil
 	}
 
-	return s.Retention.Duration
+	retention := s.Retention.Duration
+
+	if retention < MinRetention || retention > MaxRetention {
+		return 0, fmt.Errorf(
+			"retention %s is out of range: must be between %s and %s inclusive",
+			retention, MinRetention, MaxRetention,
+		)
+	}
+
+	return retention, nil
 }
 
 // DeletionPolicyValue returns the requested deletion policy, falling back to

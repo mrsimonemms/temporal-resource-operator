@@ -70,6 +70,11 @@ linters:
       - linters:
           - dupl
         path: _test\.go
+      # Duration strings in a table are test data, not magic constants. Hoisting
+      # "7d" into a name would make the tables harder to read, not easier.
+      - linters:
+          - goconst
+        path: _test\.go
       - linters:
           - staticcheck
         text: "ST1001"

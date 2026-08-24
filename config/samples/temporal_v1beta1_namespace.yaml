@@ -11,7 +11,10 @@ metadata:
 spec:
   connectionRef:
     name: connection-sample
-  retention: 72h
+  # Go's duration units, plus a leading number of days where 1d is exactly 24h.
+  # "3d" and "72h" are the same duration. Must be between 1d and 90d inclusive,
+  # whichever notation is used.
+  retention: 3d
   # Delete is the default. Set it to Orphan to leave the Temporal namespace
   # behind when this resource is deleted - which is also how a deletion blocked
   # on a missing Connection is released.
@@ -31,5 +34,5 @@ metadata:
 spec:
   connectionRef:
     name: connection-sample
-  retention: 24h
+  retention: 1d
   deletionPolicy: Orphan

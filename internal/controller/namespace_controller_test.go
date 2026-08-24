@@ -271,7 +271,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 
 		It("should not be affected by the rest of the spec", func() {
 			ns := dependant("default", "ns", dependedOn)
-			ns.Spec.Retention = &metav1.Duration{Duration: time.Hour}
+			ns.Spec.Retention = &temporalv1beta1.Duration{Duration: time.Hour}
 			ns.Spec.DeletionPolicy = temporalv1beta1.NamespaceDeletionPolicyOrphan
 			ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 
@@ -480,7 +480,7 @@ var _ = Describe("Namespace Controller", func() {
 	}
 
 	// createNamespace persists a Namespace referencing the test Connection.
-	createNamespace := func(retention *metav1.Duration) *temporalv1beta1.Namespace {
+	createNamespace := func(retention *temporalv1beta1.Duration) *temporalv1beta1.Namespace {
 		ns := &temporalv1beta1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec: temporalv1beta1.NamespaceSpec{
@@ -719,7 +719,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should record Created for a namespace it registers", func() {
-			ns := createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			ns := createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 
 			result, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -740,8 +740,178 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(condition.ObservedGeneration).To(Equal(ns.Generation))
 		})
 
+		It("should send a day-based retention to Temporal as hours", func() {
+			// The retention that caused the outage, reconciled end to end. "7d"
+			// is 168 hours, and Temporal is told the duration, not the string.
+			retention, err := temporalv1beta1.ParseDuration("7d")
+			Expect(err).NotTo(HaveOccurred())
+
+			createNamespace(&temporalv1beta1.Duration{Duration: retention})
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(temporalClient.created).To(HaveLen(1))
+			Expect(temporalClient.created[0].retention).To(Equal(168*time.Hour),
+				"7d should reach Temporal as 168h")
+
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should send the minimum retention to Temporal as 24h", func() {
+			retention, err := temporalv1beta1.ParseDuration("1d")
+			Expect(err).NotTo(HaveOccurred())
+
+			createNamespace(&temporalv1beta1.Duration{Duration: retention})
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(temporalClient.created).To(HaveLen(1))
+			Expect(temporalClient.created[0].retention).To(Equal(24 * time.Hour))
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("should send the maximum retention to Temporal as 2160h", func() {
+			retention, err := temporalv1beta1.ParseDuration("90d")
+			Expect(err).NotTo(HaveOccurred())
+
+			createNamespace(&temporalv1beta1.Duration{Duration: retention})
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(temporalClient.created).To(HaveLen(1))
+			Expect(temporalClient.created[0].retention).To(Equal(2160 * time.Hour))
+			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		DescribeTable(
+			"should reconcile equivalent notations to the same Temporal duration",
+			func(notation string, expected time.Duration) {
+				retention, err := temporalv1beta1.ParseDuration(notation)
+				Expect(err).NotTo(HaveOccurred())
+
+				createNamespace(&temporalv1beta1.Duration{Duration: retention})
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(temporalClient.created[0].retention).To(Equal(expected),
+					"%q should reach Temporal as %s", notation, expected)
+			},
+			Entry("1d", "1d", 24*time.Hour),
+			Entry("24h", "24h", 24*time.Hour),
+			Entry("1440m", "1440m", 24*time.Hour),
+			Entry("86400s", "86400s", 24*time.Hour),
+			Entry("7d", "7d", 168*time.Hour),
+			Entry("168h", "168h", 168*time.Hour),
+			Entry("90d", "90d", 2160*time.Hour),
+			Entry("2160h", "2160h", 2160*time.Hour),
+		)
+
+		It("should default an omitted retention to 72h", func() {
+			createNamespace(nil)
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(temporalClient.created).To(HaveLen(1))
+			Expect(temporalClient.created[0].retention).To(Equal(temporalv1beta1.DefaultRetention))
+			Expect(temporalClient.created[0].retention).To(Equal(72 * time.Hour))
+		})
+
+		// An out-of-range retention cannot be created any more, because the CRD
+		// rejects it - which is why these specs are backed by a fake client
+		// holding the object directly. That stands in for an object stored
+		// before the range existed: it still arrives through the cache, and the
+		// answer is to say so rather than to contact Temporal with a duration
+		// nobody asked for.
+		DescribeTable(
+			"should refuse to reconcile an out-of-range retention",
+			func(retention time.Duration) {
+				stale := &temporalv1beta1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       name,
+						Namespace:  namespace,
+						Finalizers: []string{temporalv1beta1.NamespaceFinalizer},
+					},
+					Spec: temporalv1beta1.NamespaceSpec{
+						ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
+						Retention:     &temporalv1beta1.Duration{Duration: retention},
+					},
+				}
+
+				stored := fake.NewClientBuilder().
+					WithScheme(k8sClient.Scheme()).
+					WithIndex(&temporalv1beta1.Namespace{}, namespaceConnectionRefIndex,
+						indexNamespaceByConnection).
+					WithObjects(stale).
+					WithStatusSubresource(stale).
+					Build()
+
+				invalid := &NamespaceReconciler{
+					Client:   stored,
+					Scheme:   stored.Scheme(),
+					Resolver: reconciler.Resolver,
+					Connect:  reconciler.Connect,
+				}
+
+				result, err := invalid.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred(), "an invalid spec is not a retryable failure")
+				Expect(result.RequeueAfter).To(BeZero(), "only a spec change can fix this")
+
+				Expect(temporalClient.created).To(BeEmpty(), "Temporal must not be contacted")
+				Expect(temporalClient.existing).To(BeEmpty())
+				Expect(dialled).To(BeZero(), "the Connection must not even be dialled")
+
+				// The resource says why, rather than looking merely unready.
+				current := &temporalv1beta1.Namespace{}
+				Expect(stored.Get(ctx, key, current)).To(Succeed())
+
+				condition := meta.FindStatusCondition(
+					current.Status.Conditions, temporalv1beta1.ConditionTypeReady,
+				)
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal(ReasonInvalidRetention))
+				Expect(condition.Message).To(ContainSubstring("out of range"))
+			},
+			Entry("zero", time.Duration(0)),
+			Entry("negative", -time.Hour),
+			Entry("below the minimum", 23*time.Hour),
+			Entry("above the maximum", 91*24*time.Hour),
+			Entry("a nanosecond over the maximum", 2160*time.Hour+1),
+		)
+
+		It("should follow a change from an hour-based to a day-based retention", func() {
+			// Drift correction has to work across the two notations, since a
+			// user moving from "36h" to "2d" is expressing the same intent in a
+			// friendlier way - and one that used to break the controller.
+			createNamespace(&temporalv1beta1.Duration{Duration: 36 * time.Hour})
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(temporalClient.existing[name].Retention).To(Equal(36 * time.Hour))
+
+			By("asking for 2d instead")
+			twoDays, err := temporalv1beta1.ParseDuration("2d")
+			Expect(err).NotTo(HaveOccurred())
+
+			ns := stored()
+			ns.Spec.Retention = &temporalv1beta1.Duration{Duration: twoDays}
+			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(temporalClient.existing[name].Retention).To(Equal(48*time.Hour),
+				"2d should be applied as 48h")
+		})
+
 		It("should record Adopted for an unmarked namespace that already exists", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(24*time.Hour, nil)
 
 			_, err := reconcile()
@@ -998,7 +1168,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should leave an adopted namespace alone when the retention matches", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(24*time.Hour, nil)
 
 			_, err := reconcile()
@@ -1009,7 +1179,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should update an adopted namespace whose retention differs", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(720*time.Hour, nil)
 
 			_, err := reconcile()
@@ -1027,14 +1197,14 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should update a created namespace whose retention differs", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			ns := stored()
-			ns.Spec.Retention = &metav1.Duration{Duration: 96 * time.Hour}
+			ns.Spec.Retention = &temporalv1beta1.Duration{Duration: 96 * time.Hour}
 			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 
 			_, err = reconcile()
@@ -1048,7 +1218,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should report UpdateFailed when Temporal rejects the update", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(720*time.Hour, nil)
 			temporalClient.updateErr = errors.New("retention too short")
 
@@ -1066,7 +1236,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should recover to Ready=True once the update succeeds", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(720*time.Hour, nil)
 			temporalClient.updateErr = errors.New("retention too short")
 
@@ -1101,7 +1271,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should refuse to adopt, reconfigure or recreate it", func() {
-			createNamespace(&metav1.Duration{Duration: 24 * time.Hour})
+			createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
 			putTemporalNamespace(720*time.Hour, ownerMarker("some-other-uid"))
 
 			_, err := reconcile()
@@ -1200,7 +1370,7 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should add the finalizer without disturbing the spec", func() {
-			ns := createNamespace(&metav1.Duration{Duration: 36 * time.Hour})
+			ns := createNamespace(&temporalv1beta1.Duration{Duration: 36 * time.Hour})
 			Expect(ns.Generation).To(Equal(int64(1)))
 
 			_, err := reconcile()

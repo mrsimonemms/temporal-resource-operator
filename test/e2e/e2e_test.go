@@ -739,6 +739,116 @@ spec:
 				"correcting drift must not change who owns the namespace")
 		})
 
+		It("should accept a retention written in days, and keep reconciling", func() {
+			// The bug this covers: "7d" was stored by a schema that only said
+			// "type: string", and from then on the controller could not list
+			// Namespaces at all - `unknown unit "d"` - so nothing reconciled
+			// again. Reaching Ready at all proves the informer survived, and
+			// the update afterwards proves it kept working.
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "7d")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+				To(Equal(retentionSeconds(168)), "7d should reach Temporal as 168h")
+
+			By("confirming Kubernetes kept the string as written")
+			Expect(namespaceRetention(temporalNamespace)).To(Equal("7d"))
+
+			By("changing to a compound day duration")
+			applyNamespace(temporalNamespace, "1d12h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+					To(Equal(retentionSeconds(36)))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Updated"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should reconcile the minimum retention", func() {
+			// The lower bound of the supported range, against a real Service.
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "1d")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+				To(Equal(retentionSeconds(24)), "1d should reach Temporal as 24h")
+		})
+
+		It("should refuse a retention outside 1 to 90 days at admission", func() {
+			// The range is enforced on the duration, so an out-of-range value is
+			// refused whichever way it is written. None of these can reach
+			// storage, which is what keeps the controller from ever seeing one.
+			for _, bad := range []string{"1h", "23h59m59s", "1439m", "0", "-1d", "91d", "2161h", "90d1ns"} {
+				manifest := fmt.Sprintf(`apiVersion: temporal.simonemms.com/v1beta1
+kind: Namespace
+metadata:
+  name: %s
+  namespace: default
+spec:
+  connectionRef:
+    name: connection-sample
+  retention: %q
+`, temporalNamespace, bad)
+
+				cmd := exec.Command("kubectl", "apply", "-f", "-")
+				cmd.Stdin = strings.NewReader(manifest)
+
+				output, err := utils.Run(cmd)
+				Expect(err).To(HaveOccurred(), "%q must not be storable: %s", bad, output)
+			}
+
+			By("confirming the boundaries themselves are accepted")
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "90d")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(describeTemporalNamespace(temporalNamespace).Config.WorkflowExecutionRetentionTTL).
+				To(Equal(retentionSeconds(2160)), "90d should reach Temporal as 2160h")
+		})
+
+		It("should refuse a malformed retention at admission", func() {
+			// Kubernetes must reject these outright. If any one of them could
+			// be stored, it would break every subsequent list of Namespaces and
+			// take the controller down with it.
+			for _, bad := range []string{"7days", "7dd", "1d2d", "1.5d", "forever"} {
+				manifest := fmt.Sprintf(`apiVersion: temporal.simonemms.com/v1beta1
+kind: Namespace
+metadata:
+  name: %s
+  namespace: default
+spec:
+  connectionRef:
+    name: connection-sample
+  retention: %q
+`, temporalNamespace, bad)
+
+				cmd := exec.Command("kubectl", "apply", "-f", "-")
+				cmd.Stdin = strings.NewReader(manifest)
+
+				output, err := utils.Run(cmd)
+				Expect(err).To(HaveOccurred(), "%q must not be storable: %s", bad, output)
+			}
+
+			By("confirming the operator is still reconciling")
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "7d")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+
 		It("should default retention to 72h", func() {
 			applyConnectionSample()
 			applyNamespace(temporalNamespace, "")
@@ -1493,6 +1603,18 @@ func temporalNamespaceExists(name string) bool {
 	_, err := utils.Run(temporalCLI("operator", "namespace", "describe", "-o", "json", "-n", name))
 
 	return err == nil
+}
+
+// namespaceRetention reads spec.retention back as the API server stored it,
+// which is the string the user wrote rather than the operator's canonical form.
+func namespaceRetention(name string) string {
+	cmd := exec.Command("kubectl", "get", "tns", name, "-n", "default",
+		"-o", "jsonpath={.spec.retention}")
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+
+	return strings.TrimSpace(output)
 }
 
 // retentionSeconds renders a whole number of hours the way Temporal reports

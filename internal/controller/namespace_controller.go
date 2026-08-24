@@ -61,6 +61,12 @@ const (
 	// ReasonReconciled means the Temporal namespace already matched the spec.
 	ReasonReconciled = "Reconciled"
 
+	// ReasonInvalidRetention means spec.retention is outside the supported
+	// range. The CRD rejects such a value on the way in, so this is reported for
+	// an object stored before the range was enforced, or written by something
+	// that bypassed admission.
+	ReasonInvalidRetention = "InvalidRetention"
+
 	// ReasonConnectionNotFound means the referenced Connection does not exist.
 	ReasonConnectionNotFound = "ConnectionNotFound"
 
@@ -232,6 +238,11 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	switch {
 	case reconcileErr == nil:
 		return ctrl.Result{RequeueAfter: namespaceResyncInterval}, nil
+	case reason == ReasonInvalidRetention:
+		// Only a change to the spec can fix this, and that arrives as a fresh
+		// event. Retrying on a timer would just repeat the same complaint.
+		log.Error(reconcileErr, "Namespace spec is invalid", "reason", reason)
+		return ctrl.Result{}, nil
 	case reason == ReasonConnectionNotFound, reason == ReasonConnectionNotReady:
 		// The dependency will become ready on its own schedule. Waiting for it
 		// is not a failure, so retry on a fixed interval rather than burning
@@ -252,6 +263,13 @@ func (r *NamespaceReconciler) reconcileNamespace(
 	ctx context.Context,
 	ns *temporalv1beta1.Namespace,
 ) (reason, message string, err error) {
+	// Check the spec before reaching for the network. An out-of-range retention
+	// is not something a retry will fix, and there is no sense dialling Temporal
+	// to find that out.
+	if _, err := ns.Spec.RetentionDuration(); err != nil {
+		return ReasonInvalidRetention, "", err
+	}
+
 	conn, reason, err := r.readyConnection(ctx, ns)
 	if err != nil {
 		return reason, "", err
@@ -304,7 +322,12 @@ func (r *NamespaceReconciler) createNamespace(
 	}
 
 	name := ns.TemporalName()
-	retention := ns.Spec.RetentionDuration()
+
+	// Already validated by reconcileNamespace, which runs before this.
+	retention, err := ns.Spec.RetentionDuration()
+	if err != nil {
+		return ReasonInvalidRetention, "", err
+	}
 
 	// Stamp the namespace with this resource's identity as it is registered, so
 	// that no namespace the operator owns has ever existed unmarked. A
@@ -351,7 +374,11 @@ func (r *NamespaceReconciler) reconcileExisting(
 
 	adopting := establishOwnership(ns, owner)
 
-	desired := ns.Spec.RetentionDuration()
+	desired, err := ns.Spec.RetentionDuration()
+	if err != nil {
+		return ReasonInvalidRetention, "", err
+	}
+
 	if actual.Retention == desired {
 		if adopting {
 			return ReasonAdopted, fmt.Sprintf("Adopted existing Temporal namespace %q", name), nil
@@ -598,11 +625,11 @@ func (r *NamespaceReconciler) removeFinalizer(ctx context.Context, ns *temporalv
 // finalizerPatch captures the resource as it stands, so that only the finalizer
 // change is sent.
 //
-// A full update would round-trip the spec, and marshalling it rewrites
-// metav1.Duration into its canonical form - "36h" becomes "36h0m0s". The API
-// server sees that as a spec change, bumps the generation, and wakes the
-// controller up again for no reason. Optimistic locking makes a concurrent
-// finalizer write a retryable conflict rather than a silent clobber.
+// A full update would round-trip the spec, and marshalling it rewrites a
+// Duration into its canonical form - "36h" becomes "36h0m0s", and "7d" becomes
+// "168h0m0s". The API server sees that as a spec change, bumps the generation,
+// and wakes the controller up again for no reason. Optimistic locking makes a
+// concurrent finalizer write a retryable conflict rather than a silent clobber.
 func finalizerPatch(ns *temporalv1beta1.Namespace) client.Patch {
 	return client.MergeFromWithOptions(ns.DeepCopy(), client.MergeFromWithOptimisticLock{})
 }

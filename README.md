@@ -314,7 +314,7 @@ metadata:
 spec:
   connectionRef:
     name: production
-  retention: 168h
+  retention: 7d
 ```
 
 ```sh
@@ -323,7 +323,7 @@ kubectl get tns
 
 ```text
 NAME       CONNECTION   RETENTION   OWNERSHIP   READY   REASON     AGE
-payments   production   168h        Created     True    Created    5s
+payments   production   7d          Created     True    Created    5s
 ```
 
 ### 3. Add a Search Attribute and a Nexus Endpoint
@@ -507,7 +507,7 @@ metadata:
 spec:
   connectionRef:
     name: production
-  retention: 168h
+  retention: 7d
   deletionPolicy: Delete
 ```
 
@@ -517,11 +517,38 @@ spec:
 | --- | --- | --- | --- | --- | --- |
 | `metadata.name` | string | yes | — | no | The Temporal Namespace name. Kubernetes forbids renaming a resource. |
 | `spec.connectionRef.name` | string | yes | — | yes | `Connection` in the same Kubernetes namespace. Must be non-empty. |
-| `spec.retention` | duration | no | `72h` | yes | How long closed workflow histories are kept. |
+| `spec.retention` | duration | no | `72h` | yes | How long closed workflow histories are kept. Between 1 and 90 days inclusive. |
 | `spec.deletionPolicy` | enum | no | `Delete` | yes | `Delete` or `Orphan`. See [Deletion policy](#deletion-policy). |
 
-`retention` accepts only the forms Go's `time.ParseDuration` understands, so
-`72h` rather than `3d`. Changing it reconciles the Temporal Namespace in place.
+`retention` is a duration string. Go's units all work — `72h`, `1h30m`, `90m` —
+and so does a leading whole number of days, where **one day is exactly 24
+hours**: `7d` is `168h`, `1d12h` is `36h`, `7d30m` is `168h30m`. Days are not a
+calendar concept, so `1d` stays 24 hours across a clock change.
+
+**Retention must be between 1 and 90 days inclusive.** The limit is on the
+duration, not on how you write it, so all of these are the minimum and all are
+accepted:
+
+```text
+1d   24h   1440m   86400s
+```
+
+and both of these are the maximum:
+
+```text
+90d   2160h
+```
+
+Anything shorter than `1d` or longer than `90d` is refused, whichever notation
+it is written in — `1h`, `23h59m59s` and `1439m` are all too short, and `91d`,
+`2161h` and even `90d1ns` are all too long. So are malformed values such as
+`7days`, `7dd`, `1d2d`, `1.5d` and arbitrary text. All of it is rejected when you
+apply it, rather than being stored and failing later.
+
+A negative or zero retention is rejected too, rather than being treated as
+"unset". Leave the field out entirely if you want the default.
+
+Changing `retention` reconciles the Temporal Namespace in place.
 
 `connectionRef` is mutable, unlike on the other resources, but repointing it at
 a different Temporal Service moves management rather than migrating anything:
