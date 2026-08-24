@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 
+	commonpb "go.temporal.io/api/common/v1"
 	nexuspb "go.temporal.io/api/nexus/v1"
 	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -71,6 +73,14 @@ type NexusEndpoint struct {
 	// TaskQueue is the Nexus task queue requests are routed to.
 	TaskQueue string
 
+	// Description is the endpoint's Markdown description, as Temporal holds it.
+	//
+	// Temporal stores it as a payload rather than a string, so this is the
+	// decoded form. A payload written by something using an encoding this
+	// operator does not understand reads as empty; see DescriptionMatches for
+	// what that means in practice.
+	Description string
+
 	// spec is the server's own spec, kept so that an update can preserve the
 	// parts of it the operator has no opinion about.
 	spec *nexuspb.EndpointSpec
@@ -80,6 +90,21 @@ type NexusEndpoint struct {
 // wants it to.
 func (e *NexusEndpoint) TargetMatches(namespace, taskQueue string) bool {
 	return e.TargetNamespace == namespace && e.TaskQueue == taskQueue
+}
+
+// DescriptionMatches reports whether the endpoint's description is already what
+// the caller wants.
+//
+// A nil description means the caller does not manage it, so whatever the
+// endpoint holds is by definition what was wanted. Otherwise the comparison is
+// against the decoded description, so an endpoint asked for the empty string is
+// one that should have no description at all.
+func (e *NexusEndpoint) DescriptionMatches(description *string) bool {
+	if description == nil {
+		return true
+	}
+
+	return e.Description == *description
 }
 
 // DescribeNexusEndpoint looks up a Nexus endpoint by name.
@@ -120,13 +145,20 @@ func (c *Client) DescribeNexusEndpoint(ctx context.Context, name string) (*Nexus
 func (c *Client) CreateNexusEndpoint(
 	ctx context.Context,
 	name, namespace, taskQueue string,
+	description *string,
 ) (*NexusEndpoint, error) {
 	if name == "" {
 		return nil, ErrNoNexusEndpointName
 	}
 
+	spec := workerEndpointSpec(name, namespace, taskQueue)
+
+	if err := setDescription(spec, description); err != nil {
+		return nil, fmt.Errorf("creating nexus endpoint %s: %w", name, err)
+	}
+
 	resp, err := c.client.OperatorService().CreateNexusEndpoint(ctx, &operatorservice.CreateNexusEndpointRequest{
-		Spec: workerEndpointSpec(name, namespace, taskQueue),
+		Spec: spec,
 	})
 	if err != nil {
 		var exists *serviceerror.AlreadyExists
@@ -140,31 +172,42 @@ func (c *Client) CreateNexusEndpoint(
 	return newNexusEndpoint(resp.GetEndpoint()), nil
 }
 
-// UpdateNexusEndpointTarget points an existing endpoint at a different
-// namespace and task queue, leaving the rest of its spec as it was.
+// UpdateNexusEndpoint writes the parts of an endpoint the operator manages: its
+// target, and its description where the caller manages that too. The rest of
+// the spec is left as it was.
+//
+// A nil description leaves whatever the Service holds in place; an empty one
+// removes it. Both are sent in a single update because Temporal replaces the
+// spec wholesale and each write bumps the version, so two updates in a row
+// would have the second refused.
 //
 // The endpoint must be one just read from the Service: the update carries its
 // version, and Temporal refuses it if anything has changed in the meantime.
 // That refusal surfaces as an error satisfying
 // errors.Is(err, ErrNexusEndpointChanged), which callers should answer by
 // reading the endpoint again rather than by guessing a newer version.
-func (c *Client) UpdateNexusEndpointTarget(
+func (c *Client) UpdateNexusEndpoint(
 	ctx context.Context,
 	endpoint *NexusEndpoint,
 	namespace, taskQueue string,
+	description *string,
 ) (*NexusEndpoint, error) {
 	if endpoint == nil {
 		return nil, ErrNoNexusEndpointName
 	}
 
 	// Start from what the Service holds so that anything the operator does not
-	// manage - a description, most likely - survives the update.
+	// manage - an unmanaged description, most likely - survives the update.
 	spec, _ := proto.Clone(endpoint.spec).(*nexuspb.EndpointSpec)
 	if spec == nil {
 		spec = &nexuspb.EndpointSpec{Name: endpoint.Name}
 	}
 
 	spec.Target = workerTarget(namespace, taskQueue)
+
+	if err := setDescription(spec, description); err != nil {
+		return nil, fmt.Errorf("updating nexus endpoint %s: %w", endpoint.Name, err)
+	}
 
 	resp, err := c.client.OperatorService().UpdateNexusEndpoint(ctx, &operatorservice.UpdateNexusEndpointRequest{
 		Id:      endpoint.ID,
@@ -220,8 +263,57 @@ func newNexusEndpoint(endpoint *nexuspb.Endpoint) *NexusEndpoint {
 		Name:            spec.GetName(),
 		TargetNamespace: worker.GetNamespace(),
 		TaskQueue:       worker.GetTaskQueue(),
+		Description:     decodeDescription(spec.GetDescription()),
 		spec:            spec,
 	}
+}
+
+// setDescription writes the description into a spec, where the caller manages
+// it. A nil description leaves the spec's own alone, and an empty one clears it.
+//
+// The payload is built with Temporal's default data converter, which is what
+// the CLI and UI use, so a description written here is read back by them
+// unchanged.
+func setDescription(spec *nexuspb.EndpointSpec, description *string) error {
+	if description == nil {
+		return nil
+	}
+
+	if *description == "" {
+		spec.Description = nil
+
+		return nil
+	}
+
+	payload, err := converter.GetDefaultDataConverter().ToPayload(*description)
+	if err != nil {
+		return fmt.Errorf("encoding description: %w", err)
+	}
+
+	spec.Description = payload
+
+	return nil
+}
+
+// decodeDescription reads a description payload back into a string.
+//
+// A payload written with an encoding the default data converter does not
+// understand reads as empty rather than as an error: a description nobody can
+// read is not worth failing a reconcile over, and a spec asking for a
+// description of its own replaces it anyway. The one thing that will not happen
+// is such a payload being cleared by a spec asking for the empty string, since
+// the two are indistinguishable from here.
+func decodeDescription(payload *commonpb.Payload) string {
+	if payload == nil {
+		return ""
+	}
+
+	var description string
+	if err := converter.GetDefaultDataConverter().FromPayload(payload, &description); err != nil {
+		return ""
+	}
+
+	return description
 }
 
 // workerEndpointSpec builds the spec for an endpoint routing to a worker in a

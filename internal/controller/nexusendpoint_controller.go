@@ -70,9 +70,16 @@ const (
 // without a Temporal Service.
 type TemporalNexusEndpointClient interface {
 	DescribeNexusEndpoint(ctx context.Context, name string) (*temporal.NexusEndpoint, error)
-	CreateNexusEndpoint(ctx context.Context, name, namespace, taskQueue string) (*temporal.NexusEndpoint, error)
-	UpdateNexusEndpointTarget(
-		ctx context.Context, endpoint *temporal.NexusEndpoint, namespace, taskQueue string,
+	CreateNexusEndpoint(
+		ctx context.Context,
+		name, namespace, taskQueue string,
+		description *string,
+	) (*temporal.NexusEndpoint, error)
+	UpdateNexusEndpoint(
+		ctx context.Context,
+		endpoint *temporal.NexusEndpoint,
+		namespace, taskQueue string,
+		description *string,
 	) (*temporal.NexusEndpoint, error)
 	DeleteNexusEndpoint(ctx context.Context, endpoint *temporal.NexusEndpoint) error
 	Close()
@@ -216,10 +223,15 @@ func (r *NexusEndpointReconciler) reconcileExistingEndpoint(
 	namespace := endpoint.TemporalNamespace()
 	taskQueue := endpoint.Spec.TaskQueue
 
+	description := endpoint.Spec.Description
+
 	adopting := establishEndpointOwnership(endpoint)
 	endpoint.Status.EndpointID = actual.ID
 
-	if actual.TargetMatches(namespace, taskQueue) {
+	targetMatches := actual.TargetMatches(namespace, taskQueue)
+	descriptionMatches := actual.DescriptionMatches(description)
+
+	if targetMatches && descriptionMatches {
 		if adopting {
 			return ReasonAdopted, fmt.Sprintf("Adopted existing Nexus endpoint %q", name), nil
 		}
@@ -231,7 +243,10 @@ func (r *NexusEndpointReconciler) reconcileExistingEndpoint(
 	// callers resolve through, and dropping and recreating it would break them
 	// for no reason. The version carried by the endpoint just read is what
 	// makes this safe against a concurrent change.
-	updated, err := temporalClient.UpdateNexusEndpointTarget(ctx, actual, namespace, taskQueue)
+	//
+	// Target and description go together in one call, because each write bumps
+	// the endpoint's version and a second update would be refused as stale.
+	updated, err := temporalClient.UpdateNexusEndpoint(ctx, actual, namespace, taskQueue, description)
 	if err != nil {
 		if errors.Is(err, temporal.ErrNexusEndpointChanged) {
 			// Something else moved it between the read and the write. Report it
@@ -245,10 +260,32 @@ func (r *NexusEndpointReconciler) reconcileExistingEndpoint(
 
 	endpoint.Status.EndpointID = updated.ID
 
-	return ReasonUpdated, fmt.Sprintf(
-		"Pointed Nexus endpoint %q at %s/%s, was %s/%s",
-		name, namespace, taskQueue, actual.TargetNamespace, actual.TaskQueue,
+	return ReasonUpdated, endpointUpdateMessage(
+		name, namespace, taskQueue, actual, targetMatches, descriptionMatches,
 	), nil
+}
+
+// endpointUpdateMessage describes what the update actually changed, so that a
+// description-only edit does not report a move the endpoint never made.
+func endpointUpdateMessage(
+	name, namespace, taskQueue string,
+	actual *temporal.NexusEndpoint,
+	targetMatched, descriptionMatched bool,
+) string {
+	switch {
+	case targetMatched:
+		return fmt.Sprintf("Updated the description of Nexus endpoint %q", name)
+	case descriptionMatched:
+		return fmt.Sprintf(
+			"Pointed Nexus endpoint %q at %s/%s, was %s/%s",
+			name, namespace, taskQueue, actual.TargetNamespace, actual.TaskQueue,
+		)
+	default:
+		return fmt.Sprintf(
+			"Pointed Nexus endpoint %q at %s/%s, was %s/%s, and updated its description",
+			name, namespace, taskQueue, actual.TargetNamespace, actual.TaskQueue,
+		)
+	}
 }
 
 // createEndpoint registers an endpoint that does not exist and, if ownership
@@ -282,7 +319,9 @@ func (r *NexusEndpointReconciler) createEndpoint(
 	namespace := endpoint.TemporalNamespace()
 	taskQueue := endpoint.Spec.TaskQueue
 
-	created, err := temporalClient.CreateNexusEndpoint(ctx, name, namespace, taskQueue)
+	created, err := temporalClient.CreateNexusEndpoint(
+		ctx, name, namespace, taskQueue, endpoint.Spec.Description,
+	)
 	if err != nil {
 		if errors.Is(err, temporal.ErrNexusEndpointExists) {
 			// The name was free a moment ago and is not any more. Whatever took

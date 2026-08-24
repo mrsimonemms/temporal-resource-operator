@@ -146,6 +146,18 @@ type NexusEndpointSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	TaskQueue string `json:"taskQueue"`
 
+	// description is the endpoint's description, as Markdown. Temporal's UI
+	// renders it on the endpoint's page, which is what it is for: telling
+	// whoever finds the endpoint what it is and who looks after it.
+	//
+	// Omitting the field leaves the description alone, so one set by hand or by
+	// another tool survives. Setting it makes the description managed state
+	// like anything else in the spec: the operator writes it, and puts it back
+	// if it is changed behind the operator's back. Setting it to the empty
+	// string removes the description.
+	// +optional
+	Description *string `json:"description,omitempty"`
+
 	// deletionPolicy decides what happens to the Temporal Nexus endpoint when
 	// this resource is deleted. Defaults to Delete.
 	//

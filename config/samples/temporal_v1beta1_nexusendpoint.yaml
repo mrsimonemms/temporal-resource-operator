@@ -20,6 +20,14 @@ spec:
   namespaceRef:
     name: namespace-sample
   taskQueue: payments-nexus
+  # Markdown, rendered on the endpoint's page in Temporal's UI. Leave the field
+  # out to let whoever set the description keep it; set it to "" to remove one.
+  description: |
+    ## Payments Nexus
+
+    Handles operations for the **Payments** service.
+
+    See the internal runbook for ownership and escalation.
   # Delete is the default. Set it to Orphan to leave the endpoint behind when
   # this resource is deleted.
   deletionPolicy: Delete
