@@ -1,0 +1,22 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "temporal-resource-operator.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "temporal-resource-operator.labels" . | nindent 4 }}
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.metrics.service.type }}
+  ports:
+    - name: https
+      port: {{ .Values.metrics.port }}
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    {{- include "temporal-resource-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

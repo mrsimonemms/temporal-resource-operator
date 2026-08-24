@@ -1,0 +1,33 @@
+apiVersion: v2
+name: temporal-resource-operator
+description: >-
+  A Kubernetes operator for declaratively managing resources in an existing
+  Temporal Service
+type: application
+
+# The development version carried in source control. Releases are packaged by
+# CI from the Git tag with "helm package --version <x.y.z> --app-version
+# v<x.y.z>", so this value is never the published one.
+version: 0.0.0-dev
+
+# The container image tag used when image.tag is left empty. As with the chart
+# version, release packaging overrides this with the Git tag.
+appVersion: "v0.0.0-dev"
+
+home: https://github.com/mrsimonemms/temporal-resource-operator
+sources:
+  - https://github.com/mrsimonemms/temporal-resource-operator
+
+keywords:
+  - temporal
+  - kubernetes
+  - operator
+
+maintainers:
+  - name: Simon Emms
+    email: simon@simonemms.com
+    url: https://github.com/mrsimonemms
+
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
