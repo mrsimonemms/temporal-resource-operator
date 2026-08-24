@@ -5,8 +5,8 @@ go 1.26.5
 require (
 	github.com/golang/mock v1.6.0
 	github.com/onsi/ginkgo/v2 v2.32.1
-	github.com/onsi/gomega v1.40.0
-	go.temporal.io/api v1.63.4
+	github.com/onsi/gomega v1.42.1
+	go.temporal.io/api v1.63.5
 	go.temporal.io/sdk v1.48.0
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
