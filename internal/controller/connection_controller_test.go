@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 )
 
@@ -69,15 +69,15 @@ var _ = Describe("Connection Controller", func() {
 
 	// readyCondition returns the Ready condition on the resource under test.
 	readyCondition := func() *metav1.Condition {
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		Expect(k8sClient.Get(ctx, key, conn)).To(Succeed())
 
-		return meta.FindStatusCondition(conn.Status.Conditions, temporalv1alpha1.ConditionTypeReady)
+		return meta.FindStatusCondition(conn.Status.Conditions, temporalv1beta1.ConditionTypeReady)
 	}
 
 	// createConnection persists a Connection with the given spec.
-	createConnection := func(spec temporalv1alpha1.ConnectionSpec) *temporalv1alpha1.Connection {
-		conn := &temporalv1alpha1.Connection{
+	createConnection := func(spec temporalv1beta1.ConnectionSpec) *temporalv1beta1.Connection {
+		conn := &temporalv1beta1.Connection{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec:       spec,
 		}
@@ -112,7 +112,7 @@ var _ = Describe("Connection Controller", func() {
 	})
 
 	AfterEach(func() {
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		if err := k8sClient.Get(ctx, key, conn); err == nil {
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
 		}
@@ -129,12 +129,12 @@ var _ = Describe("Connection Controller", func() {
 		})
 
 		It("should return cleanly after the Connection has been deleted", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			Expect(k8sClient.Get(ctx, key, conn)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
 
@@ -153,7 +153,7 @@ var _ = Describe("Connection Controller", func() {
 
 	Context("when the Temporal Service is healthy", func() {
 		It("should report Ready=True", func() {
-			conn := createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			conn := createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 
 			result, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -169,24 +169,24 @@ var _ = Describe("Connection Controller", func() {
 			Expect(condition.Reason).To(Equal(ReasonConnected))
 			Expect(condition.ObservedGeneration).To(Equal(conn.Generation))
 
-			updated := &temporalv1alpha1.Connection{}
+			updated := &temporalv1beta1.Connection{}
 			Expect(k8sClient.Get(ctx, key, updated)).To(Succeed())
 			Expect(updated.Status.ObservedGeneration).To(Equal(conn.Generation))
 		})
 
 		It("should not rewrite an unchanged status", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			before := &temporalv1alpha1.Connection{}
+			before := &temporalv1beta1.Connection{}
 			Expect(k8sClient.Get(ctx, key, before)).To(Succeed())
 
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			after := &temporalv1alpha1.Connection{}
+			after := &temporalv1beta1.Connection{}
 			Expect(k8sClient.Get(ctx, key, after)).To(Succeed())
 			Expect(after.ResourceVersion).To(Equal(before.ResourceVersion),
 				"a no-op reconcile should not write the status")
@@ -195,7 +195,7 @@ var _ = Describe("Connection Controller", func() {
 
 	Context("when validation fails", func() {
 		It("should report Ready=False when the Temporal Service cannot be dialled", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 			dialErr = errors.New("connection refused")
 
 			_, err := reconcile()
@@ -209,7 +209,7 @@ var _ = Describe("Connection Controller", func() {
 		})
 
 		It("should report Ready=False when the health check fails", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 			temporal.healthErr = errors.New("service unhealthy")
 
 			_, err := reconcile()
@@ -224,7 +224,7 @@ var _ = Describe("Connection Controller", func() {
 		})
 
 		It("should report Ready=False when the credentials Secret is missing", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{
+			createConnection(temporalv1beta1.ConnectionSpec{
 				Address:              address,
 				CredentialsSecretRef: &corev1.LocalObjectReference{Name: "missing-secret"},
 			})
@@ -241,7 +241,7 @@ var _ = Describe("Connection Controller", func() {
 		})
 
 		It("should recover to Ready=True once the failure clears", func() {
-			createConnection(temporalv1alpha1.ConnectionSpec{Address: address})
+			createConnection(temporalv1beta1.ConnectionSpec{Address: address})
 			dialErr = errors.New("connection refused")
 
 			_, err := reconcile()
@@ -257,19 +257,19 @@ var _ = Describe("Connection Controller", func() {
 
 	Context("when the Connection is invalid", func() {
 		It("should be rejected by the API server without an address", func() {
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       temporalv1alpha1.ConnectionSpec{},
+				Spec:       temporalv1beta1.ConnectionSpec{},
 			}
 			Expect(k8sClient.Create(ctx, conn)).NotTo(Succeed())
 		})
 
 		It("should be rejected by the API server with both credential sources", func() {
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec: temporalv1alpha1.ConnectionSpec{
+				Spec: temporalv1beta1.ConnectionSpec{
 					Address:              address,
-					Credentials:          &temporalv1alpha1.Credentials{APIKey: "my-api-key"},
+					Credentials:          &temporalv1beta1.Credentials{APIKey: "my-api-key"},
 					CredentialsSecretRef: &corev1.LocalObjectReference{Name: "temporal-credentials"},
 				},
 			}

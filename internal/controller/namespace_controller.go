@@ -37,7 +37,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -181,7 +181,7 @@ type NamespaceReconciler struct {
 func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	ns := &temporalv1alpha1.Namespace{}
+	ns := &temporalv1beta1.Namespace{}
 	if err := r.Get(ctx, req.NamespacedName, ns); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted, or the cache is behind. Either way there is nothing to
@@ -214,7 +214,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	reason, message, reconcileErr := r.reconcileNamespace(ctx, ns)
 
 	condition := &metav1.Condition{
-		Type:               temporalv1alpha1.ConditionTypeReady,
+		Type:               temporalv1beta1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            message,
@@ -250,7 +250,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // means the Namespace is not Ready.
 func (r *NamespaceReconciler) reconcileNamespace(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
+	ns *temporalv1beta1.Namespace,
 ) (reason, message string, err error) {
 	conn, reason, err := r.readyConnection(ctx, ns)
 	if err != nil {
@@ -292,13 +292,13 @@ func (r *NamespaceReconciler) reconcileNamespace(
 // operator's to delete just because it had to be restored.
 func (r *NamespaceReconciler) createNamespace(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
+	ns *temporalv1beta1.Namespace,
 	temporalClient TemporalNamespaceClient,
 ) (reason, message string, err error) {
 	establishing := !ns.Status.Ownership.IsEstablished()
 
 	if establishing {
-		if err := r.persistOwnership(ctx, ns, temporalv1alpha1.NamespaceOwnershipCreating); err != nil {
+		if err := r.persistOwnership(ctx, ns, temporalv1beta1.NamespaceOwnershipCreating); err != nil {
 			return ReasonCreateFailed, "", fmt.Errorf("recording intent to create Temporal namespace: %w", err)
 		}
 	}
@@ -311,7 +311,7 @@ func (r *NamespaceReconciler) createNamespace(
 	// namespace being restored under an adopted ownership is left unmarked: the
 	// operator manages it, but it was never the operator's to own.
 	var data map[string]string
-	if ns.Status.Ownership != temporalv1alpha1.NamespaceOwnershipAdopted {
+	if ns.Status.Ownership != temporalv1beta1.NamespaceOwnershipAdopted {
 		data = map[string]string{namespaceOwnerKey: string(ns.UID)}
 	}
 
@@ -323,7 +323,7 @@ func (r *NamespaceReconciler) createNamespace(
 		// Settled in memory; the caller's status write persists it alongside
 		// the Ready condition. Should that write fail, ownership stays at
 		// Creating and the next reconcile resolves it to Created.
-		ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+		ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 	}
 
 	return ReasonCreated, fmt.Sprintf("Registered Temporal namespace %q with retention %s", name, retention), nil
@@ -333,7 +333,7 @@ func (r *NamespaceReconciler) createNamespace(
 // and corrects any drift in the settings the operator manages.
 func (r *NamespaceReconciler) reconcileExisting(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
+	ns *temporalv1beta1.Namespace,
 	temporalClient TemporalNamespaceClient,
 	actual *temporal.Namespace,
 ) (reason, message string, err error) {
@@ -372,7 +372,7 @@ func (r *NamespaceReconciler) reconcileExisting(
 // ownerOf reads the ownership marker off a Temporal namespace and compares it
 // with the resource in hand, also returning the marker's raw value so that a
 // conflict can be reported usefully.
-func ownerOf(ns *temporalv1alpha1.Namespace, actual *temporal.Namespace) (owner namespaceOwner, marker string) {
+func ownerOf(ns *temporalv1beta1.Namespace, actual *temporal.Namespace) (owner namespaceOwner, marker string) {
 	if actual == nil {
 		return ownerUnmarked, ""
 	}
@@ -400,7 +400,7 @@ func ownerOf(ns *temporalv1alpha1.Namespace, actual *temporal.Namespace) (owner 
 // An established ownership is never revisited: whether the namespace exists
 // right now says nothing about who created it, so re-deriving ownership from
 // its existence would let a Created namespace silently become Adopted.
-func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bool {
+func establishOwnership(ns *temporalv1beta1.Namespace, owner namespaceOwner) bool {
 	if ns.Status.Ownership.IsEstablished() {
 		return false
 	}
@@ -408,7 +408,7 @@ func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bo
 	if owner == ownerSelf {
 		// Temporal says this resource registered the namespace, so it did -
 		// however the reconcile that registered it happened to end.
-		ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+		ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 
 		return false
 	}
@@ -417,7 +417,7 @@ func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bo
 	// an earlier reconcile was part-way through creating one: the operator only
 	// ever registers namespaces with the marker already on them. Adopting is
 	// the conservative reading, because an adopted namespace is never deleted.
-	ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipAdopted
+	ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipAdopted
 
 	return true
 }
@@ -431,12 +431,12 @@ func establishOwnership(ns *temporalv1alpha1.Namespace, owner namespaceOwner) bo
 //nolint:dupl // mirrored by SearchAttribute.finalise on purpose
 func (r *NamespaceReconciler) finalise(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
-	observed *temporalv1alpha1.NamespaceStatus,
+	ns *temporalv1beta1.Namespace,
+	observed *temporalv1beta1.NamespaceStatus,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	if !controllerutil.ContainsFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+	if !controllerutil.ContainsFinalizer(ns, temporalv1beta1.NamespaceFinalizer) {
 		// Nothing is holding the resource open, so it is already on its way out.
 		return ctrl.Result{}, nil
 	}
@@ -449,7 +449,7 @@ func (r *NamespaceReconciler) finalise(
 	// blocked forever - a namespace whose Connection has been deleted, or whose
 	// ownership Temporal can no longer confirm - so it must not depend on any
 	// of the machinery that could be what is broken.
-	if policy := ns.Spec.DeletionPolicyValue(); policy == temporalv1alpha1.NamespaceDeletionPolicyOrphan {
+	if policy := ns.Spec.DeletionPolicyValue(); policy == temporalv1beta1.NamespaceDeletionPolicyOrphan {
 		log.Info("Leaving Temporal namespace in place",
 			"namespace", name, "deletionPolicy", string(policy))
 
@@ -472,7 +472,7 @@ func (r *NamespaceReconciler) finalise(
 		// this resource is responsible for, or walk away from an unresolved
 		// ownership problem without anyone noticing.
 		condition := &metav1.Condition{
-			Type:               temporalv1alpha1.ConditionTypeReady,
+			Type:               temporalv1beta1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            err.Error(),
@@ -506,7 +506,7 @@ func (r *NamespaceReconciler) finalise(
 // idempotent across retries.
 func (r *NamespaceReconciler) deleteTemporalNamespace(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
+	ns *temporalv1beta1.Namespace,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
@@ -554,7 +554,7 @@ func (r *NamespaceReconciler) deleteTemporalNamespace(
 		return ReasonOwnershipUnverified, fmt.Errorf(
 			"refusing to delete temporal namespace %q: it carries no %s marker, so it cannot be confirmed "+
 				"as this resource's to remove; resolve it by hand, then remove the %s finalizer",
-			name, namespaceOwnerKey, temporalv1alpha1.NamespaceFinalizer,
+			name, namespaceOwnerKey, temporalv1beta1.NamespaceFinalizer,
 		)
 	case ownerSelf:
 	}
@@ -573,10 +573,10 @@ func (r *NamespaceReconciler) deleteTemporalNamespace(
 }
 
 // ensureFinalizer adds the finalizer if it is missing.
-func (r *NamespaceReconciler) ensureFinalizer(ctx context.Context, ns *temporalv1alpha1.Namespace) error {
+func (r *NamespaceReconciler) ensureFinalizer(ctx context.Context, ns *temporalv1beta1.Namespace) error {
 	patch := finalizerPatch(ns)
 
-	if !controllerutil.AddFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+	if !controllerutil.AddFinalizer(ns, temporalv1beta1.NamespaceFinalizer) {
 		return nil
 	}
 
@@ -585,10 +585,10 @@ func (r *NamespaceReconciler) ensureFinalizer(ctx context.Context, ns *temporalv
 
 // removeFinalizer releases the finalizer, allowing Kubernetes to remove the
 // resource.
-func (r *NamespaceReconciler) removeFinalizer(ctx context.Context, ns *temporalv1alpha1.Namespace) error {
+func (r *NamespaceReconciler) removeFinalizer(ctx context.Context, ns *temporalv1beta1.Namespace) error {
 	patch := finalizerPatch(ns)
 
-	if !controllerutil.RemoveFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+	if !controllerutil.RemoveFinalizer(ns, temporalv1beta1.NamespaceFinalizer) {
 		return nil
 	}
 
@@ -603,7 +603,7 @@ func (r *NamespaceReconciler) removeFinalizer(ctx context.Context, ns *temporalv
 // server sees that as a spec change, bumps the generation, and wakes the
 // controller up again for no reason. Optimistic locking makes a concurrent
 // finalizer write a retryable conflict rather than a silent clobber.
-func finalizerPatch(ns *temporalv1alpha1.Namespace) client.Patch {
+func finalizerPatch(ns *temporalv1beta1.Namespace) client.Patch {
 	return client.MergeFromWithOptions(ns.DeepCopy(), client.MergeFromWithOptimisticLock{})
 }
 
@@ -611,9 +611,9 @@ func finalizerPatch(ns *temporalv1alpha1.Namespace) client.Patch {
 // readiness.
 func (r *NamespaceReconciler) getConnection(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
-) (*temporalv1alpha1.Connection, string, error) {
-	conn := &temporalv1alpha1.Connection{}
+	ns *temporalv1beta1.Namespace,
+) (*temporalv1beta1.Connection, string, error) {
+	conn := &temporalv1beta1.Connection{}
 	key := types.NamespacedName{Namespace: ns.Namespace, Name: ns.Spec.ConnectionRef.Name}
 
 	if err := r.Get(ctx, key, conn); err != nil {
@@ -637,8 +637,8 @@ func (r *NamespaceReconciler) getConnection(
 // be stale, so Temporal calls made afterwards still report their own errors.
 func (r *NamespaceReconciler) readyConnection(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
-) (*temporalv1alpha1.Connection, string, error) {
+	ns *temporalv1beta1.Namespace,
+) (*temporalv1beta1.Connection, string, error) {
 	conn, reason, err := r.getConnection(ctx, ns)
 	if err != nil {
 		return nil, reason, err
@@ -646,7 +646,7 @@ func (r *NamespaceReconciler) readyConnection(
 
 	key := types.NamespacedName{Namespace: conn.Namespace, Name: conn.Name}
 
-	ready := meta.FindStatusCondition(conn.Status.Conditions, temporalv1alpha1.ConditionTypeReady)
+	ready := meta.FindStatusCondition(conn.Status.Conditions, temporalv1beta1.ConditionTypeReady)
 	switch {
 	case ready == nil:
 		return nil, ReasonConnectionNotReady, fmt.Errorf("connection %s has not been validated yet", key)
@@ -661,7 +661,7 @@ func (r *NamespaceReconciler) readyConnection(
 // describes.
 func (r *NamespaceReconciler) temporalClient(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 ) (TemporalNamespaceClient, string, error) {
 	opts, err := r.Resolver.ResolveConnection(ctx, conn)
 	if err != nil {
@@ -695,8 +695,8 @@ func (r *NamespaceReconciler) connectNamespace(
 // the value has to be durable before the Temporal call it describes is made.
 func (r *NamespaceReconciler) persistOwnership(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
-	ownership temporalv1alpha1.NamespaceOwnership,
+	ns *temporalv1beta1.Namespace,
+	ownership temporalv1beta1.NamespaceOwnership,
 ) error {
 	if ns.Status.Ownership == ownership {
 		return nil
@@ -715,8 +715,8 @@ func (r *NamespaceReconciler) persistOwnership(
 // changes made along the way are still detected.
 func (r *NamespaceReconciler) updateNamespaceStatus(
 	ctx context.Context,
-	ns *temporalv1alpha1.Namespace,
-	observed *temporalv1alpha1.NamespaceStatus,
+	ns *temporalv1beta1.Namespace,
+	observed *temporalv1beta1.NamespaceStatus,
 	condition *metav1.Condition,
 ) error {
 	meta.SetStatusCondition(&ns.Status.Conditions, *condition)
@@ -736,7 +736,7 @@ func (r *NamespaceReconciler) updateNamespaceStatus(
 // half-built or of the wrong type, so it never assumes anything about what it
 // is handed.
 func indexNamespaceByConnection(obj client.Object) []string {
-	ns, ok := obj.(*temporalv1alpha1.Namespace)
+	ns, ok := obj.(*temporalv1beta1.Namespace)
 	if !ok || ns == nil {
 		return nil
 	}
@@ -763,7 +763,7 @@ func indexNamespaceByConnection(obj client.Object) []string {
 func (r *NamespaceReconciler) namespacesForConnection(ctx context.Context, conn client.Object) []ctrl.Request {
 	log := logf.FromContext(ctx)
 
-	namespaces := &temporalv1alpha1.NamespaceList{}
+	namespaces := &temporalv1beta1.NamespaceList{}
 	if err := r.List(
 		ctx, namespaces,
 		client.InNamespace(conn.GetNamespace()),
@@ -801,7 +801,7 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// returns; there is nothing for a caller's context to cancel.
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
-		&temporalv1alpha1.Namespace{},
+		&temporalv1beta1.Namespace{},
 		namespaceConnectionRefIndex,
 		indexNamespaceByConnection,
 	); err != nil {
@@ -812,7 +812,7 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Only the spec matters here, so ignore the status writes this
 		// controller makes itself. Kubernetes bumps the generation when it
 		// stamps a deletion timestamp, so the finalizer flow still runs.
-		For(&temporalv1alpha1.Namespace{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&temporalv1beta1.Namespace{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Wake dependants as soon as their Connection changes, rather than
 		// leaving them to notice on their next retry.
 		//
@@ -822,7 +822,7 @@ func (r *NamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// predicates passed to For() apply only to For(), so it does not reach
 		// this watch of its own accord.
 		Watches(
-			&temporalv1alpha1.Connection{},
+			&temporalv1beta1.Connection{},
 			handler.EnqueueRequestsFromMapFunc(r.namespacesForConnection),
 		).
 		Named("namespace").

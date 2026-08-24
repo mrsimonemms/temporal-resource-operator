@@ -319,7 +319,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("applying the Connection sample")
 			cmd = exec.Command("kubectl", "apply", "-n", "default",
-				"-f", "config/samples/temporal_v1alpha1_connection.yaml")
+				"-f", "config/samples/temporal_v1beta1_connection.yaml")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply the Connection sample")
 
@@ -335,7 +335,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should report Ready=False for an unreachable Temporal Service", func() {
 			By("creating a Connection pointing at nothing")
 			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
-			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   name: connection-unreachable
@@ -354,7 +354,7 @@ spec:
 
 		It("should reject a Connection with both credential sources", func() {
 			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
-			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   name: connection-invalid
@@ -767,7 +767,7 @@ spec:
 
 		It("should reject a Namespace without a connectionRef name", func() {
 			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
-			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1alpha1
+			cmd.Stdin = strings.NewReader(`apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   name: namespace-invalid
@@ -1278,7 +1278,7 @@ spec:
 // Ready, so that Namespace specs start from a satisfied dependency.
 func applyConnectionSample() {
 	cmd := exec.Command("kubectl", "apply", "-n", "default",
-		"-f", "config/samples/temporal_v1alpha1_connection.yaml")
+		"-f", "config/samples/temporal_v1beta1_connection.yaml")
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Connection sample")
 
@@ -1296,7 +1296,7 @@ func applyNamespace(name, retention string) {
 // applyNamespaceWithPolicy is applyNamespace with an explicit deletion policy.
 // An empty policy leaves the field out, so the CRD default applies.
 func applyNamespaceWithPolicy(name, retention, deletionPolicy string) {
-	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+	manifest := `apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   name: ` + name + `
@@ -1506,7 +1506,7 @@ func retentionSeconds(hours int) string {
 // deliberately different, because that is the distinction the API exists to
 // draw. An empty deletionPolicy is left out so the CRD default applies.
 func applySearchAttribute(resourceName, temporalName, namespaceRef, attrType, deletionPolicy string) {
-	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+	manifest := `apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   name: ` + resourceName + `
@@ -1603,7 +1603,7 @@ func temporalSearchAttributeType(temporalNamespace, name string) string {
 // applyNexusEndpoint applies a NexusEndpoint. resourceName is the Kubernetes
 // resource's name and temporalName is what Temporal is asked for.
 func applyNexusEndpoint(resourceName, temporalName, namespaceRef, taskQueue, deletionPolicy string) {
-	manifest := `apiVersion: temporal.simonemms.com/v1alpha1
+	manifest := `apiVersion: temporal.simonemms.com/v1beta1
 kind: NexusEndpoint
 metadata:
   name: ` + resourceName + `

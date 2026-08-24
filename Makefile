@@ -193,9 +193,10 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 
 ##@ Helm
 
-# The chart is the public installation method. Its CRDs are copies of the
-# controller-gen output in config/crd/bases - "helm-sync" refreshes them and
-# "helm-check" fails if they have drifted.
+# The chart is the public installation method. Its crds/ directory is derived
+# from the controller-gen output in config/crd/bases and is gitignored, so every
+# target that needs CRDs depends on "helm-sync" to populate it first.
+# "helm-check" syncs and then proves the two are byte-identical.
 CHART_DIR ?= charts/temporal-resource-operator
 CHART_CRD_DIR ?= $(CHART_DIR)/crds
 CHART_DIST ?= dist/charts
@@ -225,7 +226,7 @@ helm-lint: helm-check ## Lint the Helm chart.
 	"$(HELM)" lint "$(CHART_DIR)"
 
 .PHONY: helm-template
-helm-template: ## Render the Helm chart with defaults, then with representative overrides.
+helm-template: helm-sync ## Render the Helm chart with defaults, then with representative overrides.
 	"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" \
 		--namespace "$(CHART_NAMESPACE)" --include-crds
 	@echo "Rendering representative overrides"
@@ -261,7 +262,7 @@ helm-package: helm-check ## Package the Helm chart into $(CHART_DIST).
 helm-test: helm-lint helm-unittest helm-template helm-package ## Run every offline Helm check.
 
 .PHONY: helm-smoke
-helm-smoke: ## Install the chart into the current Kind cluster and check it works.
+helm-smoke: helm-sync ## Install the chart into the current Kind cluster and check it works.
 	KIND="$(KIND)" KIND_CLUSTER="$(KIND_CLUSTER)" HELM="$(HELM)" \
 		KUBECTL="$(KUBECTL)" CHART_DIR="$(CHART_DIR)" \
 		CHART_RELEASE="$(CHART_RELEASE)" CHART_NAMESPACE="$(CHART_NAMESPACE)" \

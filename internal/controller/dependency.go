@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 )
 
 // Three resources now depend on a Connection and find each other the same way.
@@ -50,8 +50,8 @@ func getConnection(
 	reader client.Reader,
 	ref string,
 	k8sNamespace string,
-) (*temporalv1alpha1.Connection, string, error) {
-	conn := &temporalv1alpha1.Connection{}
+) (*temporalv1beta1.Connection, string, error) {
+	conn := &temporalv1beta1.Connection{}
 	key := types.NamespacedName{Namespace: k8sNamespace, Name: ref}
 
 	if err := reader.Get(ctx, key, conn); err != nil {

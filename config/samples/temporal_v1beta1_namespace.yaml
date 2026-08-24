@@ -1,6 +1,6 @@
 # This is created by the operator - if this is deleted, it
 # deletes the namespace from Temporal
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   labels:
@@ -20,7 +20,7 @@ spec:
 # This is exists before the operator - if this is deleted, it
 # is NOT deleted from Temporal. However, it will still update
 # the settings of the namespace
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   labels:

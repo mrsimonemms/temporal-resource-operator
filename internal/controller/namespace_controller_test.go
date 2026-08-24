@@ -40,7 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -192,7 +192,7 @@ type flakyClient struct {
 
 	// onStatusUpdate is consulted before every status write. A non-nil result
 	// fails the write.
-	onStatusUpdate func(ns *temporalv1alpha1.Namespace) error
+	onStatusUpdate func(ns *temporalv1beta1.Namespace) error
 }
 
 func (c *flakyClient) Status() ctrlclient.SubResourceWriter {
@@ -210,7 +210,7 @@ func (w *flakyStatusWriter) Update(
 	opts ...ctrlclient.SubResourceUpdateOption,
 ) error {
 	if hook := w.client.onStatusUpdate; hook != nil {
-		if ns, ok := obj.(*temporalv1alpha1.Namespace); ok {
+		if ns, ok := obj.(*temporalv1beta1.Namespace); ok {
 			if err := hook(ns); err != nil {
 				return err
 			}
@@ -233,17 +233,17 @@ var _ = Describe("Namespace Connection dependency", func() {
 	indexedClient := func(objs ...ctrlclient.Object) ctrlclient.Client {
 		return fake.NewClientBuilder().
 			WithScheme(k8sClient.Scheme()).
-			WithIndex(&temporalv1alpha1.Namespace{}, namespaceConnectionRefIndex, indexNamespaceByConnection).
+			WithIndex(&temporalv1beta1.Namespace{}, namespaceConnectionRefIndex, indexNamespaceByConnection).
 			WithObjects(objs...).
 			Build()
 	}
 
 	// dependant builds a Namespace in the given Kubernetes namespace pointing at
 	// the named Connection.
-	dependant := func(k8sNamespace, name, connection string) *temporalv1alpha1.Namespace {
-		return &temporalv1alpha1.Namespace{
+	dependant := func(k8sNamespace, name, connection string) *temporalv1beta1.Namespace {
+		return &temporalv1beta1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k8sNamespace},
-			Spec: temporalv1alpha1.NamespaceSpec{
+			Spec: temporalv1beta1.NamespaceSpec{
 				ConnectionRef: corev1.LocalObjectReference{Name: connection},
 			},
 		}
@@ -264,16 +264,16 @@ var _ = Describe("Namespace Connection dependency", func() {
 			Entry("an empty reference",
 				dependant("default", "ns", ""), []string(nil)),
 			Entry("a nil Namespace",
-				(*temporalv1alpha1.Namespace)(nil), []string(nil)),
+				(*temporalv1beta1.Namespace)(nil), []string(nil)),
 			Entry("an object of another kind",
-				&temporalv1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: dependedOn}}, []string(nil)),
+				&temporalv1beta1.Connection{ObjectMeta: metav1.ObjectMeta{Name: dependedOn}}, []string(nil)),
 		)
 
 		It("should not be affected by the rest of the spec", func() {
 			ns := dependant("default", "ns", dependedOn)
 			ns.Spec.Retention = &metav1.Duration{Duration: time.Hour}
-			ns.Spec.DeletionPolicy = temporalv1alpha1.NamespaceDeletionPolicyOrphan
-			ns.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+			ns.Spec.DeletionPolicy = temporalv1beta1.NamespaceDeletionPolicyOrphan
+			ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 
 			Expect(indexNamespaceByConnection(ns)).To(Equal([]string{dependedOn}))
 		})
@@ -282,7 +282,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 	Describe("mapping a Connection event onto its dependants", func() {
 		var (
 			mapper *NamespaceReconciler
-			foo    *temporalv1alpha1.Connection
+			foo    *temporalv1beta1.Connection
 		)
 
 		BeforeEach(func() {
@@ -298,7 +298,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 				),
 			}
 
-			foo = &temporalv1alpha1.Connection{
+			foo = &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: dependedOn, Namespace: "default"},
 			}
 		})
@@ -335,7 +335,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 			// them resolve to the same dependants.
 			ready := foo.DeepCopy()
 			meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
-				Type:   temporalv1alpha1.ConditionTypeReady,
+				Type:   temporalv1beta1.ConditionTypeReady,
 				Status: metav1.ConditionTrue,
 				Reason: ReasonConnected,
 			})
@@ -351,7 +351,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 		})
 
 		It("should return nothing when no Namespace depends on the Connection", func() {
-			unused := &temporalv1alpha1.Connection{
+			unused := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: "unused", Namespace: "default"},
 			}
 
@@ -363,7 +363,7 @@ var _ = Describe("Namespace Connection dependency", func() {
 			failing := &NamespaceReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.Namespace{},
+					WithIndex(&temporalv1beta1.Namespace{},
 						namespaceConnectionRefIndex, indexNamespaceByConnection).
 					WithInterceptorFuncs(interceptor.Funcs{
 						List: func(
@@ -426,8 +426,8 @@ var _ = Describe("Namespace Controller", func() {
 	}
 
 	// stored returns the resource under test as the API server holds it.
-	stored := func() *temporalv1alpha1.Namespace {
-		ns := &temporalv1alpha1.Namespace{}
+	stored := func() *temporalv1beta1.Namespace {
+		ns := &temporalv1beta1.Namespace{}
 		Expect(k8sClient.Get(ctx, key, ns)).To(Succeed())
 
 		return ns
@@ -435,31 +435,31 @@ var _ = Describe("Namespace Controller", func() {
 
 	// readyCondition returns the Ready condition on the resource under test.
 	readyCondition := func() *metav1.Condition {
-		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1alpha1.ConditionTypeReady)
+		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1beta1.ConditionTypeReady)
 	}
 
 	// ownership returns the persisted ownership of the resource under test.
-	ownership := func() temporalv1alpha1.NamespaceOwnership {
+	ownership := func() temporalv1beta1.NamespaceOwnership {
 		return stored().Status.Ownership
 	}
 
 	// hasFinalizer reports whether the stored resource still holds the
 	// finalizer.
 	hasFinalizer := func() bool {
-		return controllerutil.ContainsFinalizer(stored(), temporalv1alpha1.NamespaceFinalizer)
+		return controllerutil.ContainsFinalizer(stored(), temporalv1beta1.NamespaceFinalizer)
 	}
 
 	// isGone reports whether the resource has actually left the API server.
 	isGone := func() bool {
-		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1alpha1.Namespace{}))
+		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1beta1.Namespace{}))
 	}
 
 	// createConnection persists a Connection and, when status is non-empty,
 	// gives it a Ready condition with that status.
-	createConnection := func(status metav1.ConditionStatus) *temporalv1alpha1.Connection {
-		conn := &temporalv1alpha1.Connection{
+	createConnection := func(status metav1.ConditionStatus) *temporalv1beta1.Connection {
+		conn := &temporalv1beta1.Connection{
 			ObjectMeta: metav1.ObjectMeta{Name: connectionName, Namespace: namespace},
-			Spec:       temporalv1alpha1.ConnectionSpec{Address: address},
+			Spec:       temporalv1beta1.ConnectionSpec{Address: address},
 		}
 		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
@@ -468,7 +468,7 @@ var _ = Describe("Namespace Controller", func() {
 		}
 
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               temporalv1alpha1.ConditionTypeReady,
+			Type:               temporalv1beta1.ConditionTypeReady,
 			Status:             status,
 			Reason:             ReasonConnected,
 			Message:            connectionReadyMessage,
@@ -480,10 +480,10 @@ var _ = Describe("Namespace Controller", func() {
 	}
 
 	// createNamespace persists a Namespace referencing the test Connection.
-	createNamespace := func(retention *metav1.Duration) *temporalv1alpha1.Namespace {
-		ns := &temporalv1alpha1.Namespace{
+	createNamespace := func(retention *metav1.Duration) *temporalv1beta1.Namespace {
+		ns := &temporalv1beta1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: temporalv1alpha1.NamespaceSpec{
+			Spec: temporalv1beta1.NamespaceSpec{
 				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 				Retention:     retention,
 			},
@@ -518,7 +518,7 @@ var _ = Describe("Namespace Controller", func() {
 	// setDeletionPolicy patches the deletion policy on the stored resource. It
 	// works on a terminating resource too, which is the recovery path out of a
 	// deletion the operator cannot complete.
-	setDeletionPolicy := func(policy temporalv1alpha1.NamespaceDeletionPolicy) {
+	setDeletionPolicy := func(policy temporalv1beta1.NamespaceDeletionPolicy) {
 		ns := stored()
 		ns.Spec.DeletionPolicy = policy
 		Expect(k8sClient.Update(ctx, ns)).To(Succeed())
@@ -527,7 +527,7 @@ var _ = Describe("Namespace Controller", func() {
 	// deleteConnection removes the referenced Connection, so that anything
 	// needing it during finalisation has nothing to work with.
 	deleteConnection := func() {
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 		Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
@@ -536,7 +536,7 @@ var _ = Describe("Namespace Controller", func() {
 	// breakConnection points the Connection at a Secret that does not exist, so
 	// that resolving it fails.
 	breakConnection := func() {
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 		Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 		conn.Spec.CredentialsSecretRef = &corev1.LocalObjectReference{Name: missingSecretName}
@@ -564,7 +564,7 @@ var _ = Describe("Namespace Controller", func() {
 
 	// setOwnership forces a starting ownership, standing in for whatever an
 	// earlier reconcile would have left behind.
-	setOwnership := func(value temporalv1alpha1.NamespaceOwnership) {
+	setOwnership := func(value temporalv1beta1.NamespaceOwnership) {
 		ns := stored()
 		ns.Status.Ownership = value
 		Expect(k8sClient.Status().Update(ctx, ns)).To(Succeed())
@@ -620,15 +620,15 @@ var _ = Describe("Namespace Controller", func() {
 	AfterEach(func() {
 		// Release the finalizer before cleaning up, so a spec that deliberately
 		// wedges deletion cannot leave the resource behind.
-		ns := &temporalv1alpha1.Namespace{}
+		ns := &temporalv1beta1.Namespace{}
 		if err := k8sClient.Get(ctx, key, ns); err == nil {
-			if controllerutil.RemoveFinalizer(ns, temporalv1alpha1.NamespaceFinalizer) {
+			if controllerutil.RemoveFinalizer(ns, temporalv1beta1.NamespaceFinalizer) {
 				Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 			}
 			Expect(ctrlclient.IgnoreNotFound(k8sClient.Delete(ctx, ns))).To(Succeed())
 		}
 
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 		if err := k8sClient.Get(ctx, connKey, conn); err == nil {
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
@@ -732,7 +732,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(temporalClient.created[0].data).To(Equal(ownerMarker(currentUID())))
 			Expect(temporalClient.closed).To(BeTrue(), "the Temporal client should be closed")
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			condition := readyCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -748,7 +748,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(BeEmpty(), "an existing namespace must not be recreated")
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 
 			condition := readyCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -757,11 +757,11 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should not stamp its marker on a namespace it merely adopts", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 
 			Expect(temporalClient.existing[name].Data).To(BeEmpty(),
 				"adopting a namespace must not claim it")
@@ -769,13 +769,13 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should record Created for a namespace already carrying its own marker", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, ownerMarker(currentUID()))
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, ownerMarker(currentUID()))
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(BeEmpty())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated),
 				"Temporal's own metadata proves this resource registered it")
 		})
 
@@ -784,40 +784,40 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			// The namespace now exists, which is exactly the situation that
 			// would tempt a naive implementation into calling it Adopted.
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 			Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
 			Expect(temporalClient.created).To(HaveLen(1), "the namespace must not be created twice")
 		})
 
 		It("should keep Adopted across repeated reconciles", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 			Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
 		})
 
 		It("should keep Adopted even if the namespace has to be put back", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 
 			// Someone removes it behind the operator's back.
 			delete(temporalClient.existing, name)
@@ -828,7 +828,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(temporalClient.created).To(HaveLen(1), "the namespace should be restored")
 			Expect(temporalClient.created[0].data).To(BeEmpty(),
 				"a restored adopted namespace must not be claimed either")
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted),
 				"restoring a user's namespace does not make it the operator's to delete")
 		})
 
@@ -864,7 +864,7 @@ var _ = Describe("Namespace Controller", func() {
 		It("should persist Creating before asking Temporal to register anything", func() {
 			createNamespace(nil)
 
-			var ownershipAtCreate temporalv1alpha1.NamespaceOwnership
+			var ownershipAtCreate temporalv1beta1.NamespaceOwnership
 			temporalClient.onCreate = func(string) {
 				// Read straight from the API server: the marker has to be
 				// durable by now, not merely set in memory.
@@ -874,7 +874,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownershipAtCreate).To(Equal(temporalv1alpha1.NamespaceOwnershipCreating),
+			Expect(ownershipAtCreate).To(Equal(temporalv1beta1.NamespaceOwnershipCreating),
 				"the intent to create must be durable before the namespace is registered")
 		})
 
@@ -884,8 +884,8 @@ var _ = Describe("Namespace Controller", func() {
 			// Fail exactly the write that would record the finished create.
 			// The earlier Creating write is allowed through.
 			statusErr := errors.New("status update failed")
-			k8s.onStatusUpdate = func(ns *temporalv1alpha1.Namespace) error {
-				if ns.Status.Ownership == temporalv1alpha1.NamespaceOwnershipCreated {
+			k8s.onStatusUpdate = func(ns *temporalv1beta1.Namespace) error {
+				if ns.Status.Ownership == temporalv1beta1.NamespaceOwnershipCreated {
 					return statusErr
 				}
 
@@ -898,7 +898,7 @@ var _ = Describe("Namespace Controller", func() {
 			// Temporal has the namespace; Kubernetes only knows we were trying.
 			Expect(temporalClient.created).To(HaveLen(1))
 			Expect(temporalClient.existing).To(HaveKey(name))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreating))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreating))
 
 			// The registered namespace carries this resource's marker, which is
 			// what the retry recognises.
@@ -912,7 +912,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated),
 				"the marker proves the namespace is this resource's own work")
 			Expect(temporalClient.created).To(HaveLen(1), "the namespace must not be created twice")
 			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
@@ -920,19 +920,19 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should not claim an unmarked namespace that appeared while Creating", func() {
 			createNamespace(nil)
-			setOwnership(temporalv1alpha1.NamespaceOwnershipCreating)
+			setOwnership(temporalv1beta1.NamespaceOwnershipCreating)
 
 			// Another actor registered this name in the window between the
 			// operator seeing it missing and getting round to creating it. It
 			// carries no marker, so it is not the operator's work.
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).NotTo(Equal(temporalv1alpha1.NamespaceOwnershipCreated),
+			Expect(ownership()).NotTo(Equal(temporalv1beta1.NamespaceOwnershipCreated),
 				"existence alone must never be read as ownership")
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted),
 				"an unowned namespace is managed, never destroyed")
 			Expect(temporalClient.created).To(BeEmpty())
 			Expect(temporalClient.existing[name].Data).To(BeEmpty())
@@ -940,8 +940,8 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should report a conflict when the namespace that appeared belongs to another resource", func() {
 			createNamespace(nil)
-			setOwnership(temporalv1alpha1.NamespaceOwnershipCreating)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, ownerMarker("some-other-uid"))
+			setOwnership(temporalv1beta1.NamespaceOwnershipCreating)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, ownerMarker("some-other-uid"))
 
 			_, err := reconcile()
 			Expect(err).To(MatchError(ContainSubstring("some-other-uid")))
@@ -950,7 +950,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(ReasonOwnershipConflict))
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreating),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreating),
 				"a conflict settles nothing")
 			Expect(temporalClient.created).To(BeEmpty())
 			Expect(temporalClient.updated).To(BeEmpty())
@@ -961,7 +961,7 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should retry the create when the interruption happened before registering", func() {
 			createNamespace(nil)
-			setOwnership(temporalv1alpha1.NamespaceOwnershipCreating)
+			setOwnership(temporalv1beta1.NamespaceOwnershipCreating)
 
 			// Creating was persisted but the namespace never appeared, so the
 			// earlier attempt died before - or during - the register call.
@@ -969,7 +969,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(HaveLen(1))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 		})
 
 		It("should delete a Creating namespace that carries its own marker", func() {
@@ -980,7 +980,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(temporalClient.existing[name].Data).To(Equal(ownerMarker(currentUID())))
 
 			// Rewind to the state an interrupted create would have left.
-			setOwnership(temporalv1alpha1.NamespaceOwnershipCreating)
+			setOwnership(temporalv1beta1.NamespaceOwnershipCreating)
 			beginDeletion()
 
 			_, err = reconcile()
@@ -1016,7 +1016,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.updated).To(Equal([]namespaceCall{{name: name, retention: 24 * time.Hour}}))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted),
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted),
 				"correcting drift does not change who owns the namespace")
 
 			condition := readyCondition()
@@ -1031,7 +1031,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			ns := stored()
 			ns.Spec.Retention = &metav1.Duration{Duration: 96 * time.Hour}
@@ -1043,7 +1043,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(temporalClient.updated).To(Equal([]namespaceCall{{name: name, retention: 96 * time.Hour}}))
 			Expect(temporalClient.existing[name].Retention).To(Equal(96*time.Hour),
 				"the requested retention should reach Temporal unchanged")
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 			Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
 		})
 
@@ -1062,7 +1062,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			// Ownership is still settled - the namespace is ours to manage even
 			// though this attempt to configure it failed.
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 		})
 
 		It("should recover to Ready=True once the update succeeds", func() {
@@ -1090,8 +1090,8 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.updated).To(HaveLen(1))
-			Expect(temporalClient.updated[0].retention).To(Equal(temporalv1alpha1.DefaultRetention))
-			Expect(temporalv1alpha1.DefaultRetention).To(Equal(72 * time.Hour))
+			Expect(temporalClient.updated[0].retention).To(Equal(temporalv1beta1.DefaultRetention))
+			Expect(temporalv1beta1.DefaultRetention).To(Equal(72 * time.Hour))
 		})
 	})
 
@@ -1129,7 +1129,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			// The namespace was replaced behind the operator's back by one
 			// another resource owns.
@@ -1155,7 +1155,7 @@ var _ = Describe("Namespace Controller", func() {
 			// CR A is force-removed - finalizer stripped by hand - leaving the
 			// Temporal namespace behind.
 			nsA := stored()
-			Expect(controllerutil.RemoveFinalizer(nsA, temporalv1alpha1.NamespaceFinalizer)).To(BeTrue())
+			Expect(controllerutil.RemoveFinalizer(nsA, temporalv1beta1.NamespaceFinalizer)).To(BeTrue())
 			Expect(k8sClient.Update(ctx, nsA)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, nsA)).To(Succeed())
 			Eventually(isGone).Should(BeTrue())
@@ -1187,7 +1187,7 @@ var _ = Describe("Namespace Controller", func() {
 			var finalizerAtDescribe bool
 			temporalClient.onCreate = func(string) {
 				finalizerAtDescribe = controllerutil.ContainsFinalizer(
-					stored(), temporalv1alpha1.NamespaceFinalizer,
+					stored(), temporalv1beta1.NamespaceFinalizer,
 				)
 			}
 
@@ -1207,7 +1207,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			after := stored()
-			Expect(controllerutil.ContainsFinalizer(after, temporalv1alpha1.NamespaceFinalizer)).To(BeTrue())
+			Expect(controllerutil.ContainsFinalizer(after, temporalv1beta1.NamespaceFinalizer)).To(BeTrue())
 
 			// A full update would round-trip the spec and rewrite the duration
 			// into canonical form, bumping the generation and provoking another
@@ -1222,7 +1222,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			beginDeletion()
 
@@ -1236,11 +1236,11 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should leave an adopted Temporal namespace alone", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
 
 			beginDeletion()
 			dialled = 0
@@ -1261,12 +1261,12 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			// The marker is stripped, or the namespace was replaced by an
 			// unmarked one of the same name. Either way ownership can no longer
 			// be proven.
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 			beginDeletion()
 
 			_, err = reconcile()
@@ -1279,7 +1279,7 @@ var _ = Describe("Namespace Controller", func() {
 			condition := readyCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(condition.Reason).To(Equal(ReasonOwnershipUnverified))
-			Expect(condition.Message).To(ContainSubstring(temporalv1alpha1.NamespaceFinalizer),
+			Expect(condition.Message).To(ContainSubstring(temporalv1beta1.NamespaceFinalizer),
 				"the message should say how to resolve it by hand")
 		})
 
@@ -1289,7 +1289,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, ownerMarker("some-other-uid"))
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, ownerMarker("some-other-uid"))
 			beginDeletion()
 
 			_, err = reconcile()
@@ -1399,7 +1399,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
@@ -1420,7 +1420,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			conn.Spec.CredentialsSecretRef = &corev1.LocalObjectReference{Name: missingSecretName}
@@ -1444,11 +1444,11 @@ var _ = Describe("Namespace Controller", func() {
 
 			// Readiness is a cached judgement. Refusing to act on it would
 			// strand a namespace the operator is responsible for.
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-				Type:    temporalv1alpha1.ConditionTypeReady,
+				Type:    temporalv1beta1.ConditionTypeReady,
 				Status:  metav1.ConditionFalse,
 				Reason:  ReasonConnectionFailed,
 				Message: "stale",
@@ -1466,7 +1466,7 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should release the finalizer without deleting when ownership is unknown", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, nil)
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
 
 			// The finalizer got added but ownership was never settled - the
 			// Connection was unusable, Temporal was down, or the process died.
@@ -1495,7 +1495,7 @@ var _ = Describe("Namespace Controller", func() {
 			beginDeletion()
 
 			ns := stored()
-			Expect(controllerutil.RemoveFinalizer(ns, temporalv1alpha1.NamespaceFinalizer)).To(BeTrue())
+			Expect(controllerutil.RemoveFinalizer(ns, temporalv1beta1.NamespaceFinalizer)).To(BeTrue())
 			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
 			Expect(isGone()).To(BeTrue())
 
@@ -1510,11 +1510,11 @@ var _ = Describe("Namespace Controller", func() {
 		// requestsForConnection runs the real mapper, with the real index
 		// registered, over the resource as it currently stands - standing in
 		// for what the watch would enqueue on a Connection event.
-		requestsForConnection := func(conn *temporalv1alpha1.Connection) []ctrl.Request {
+		requestsForConnection := func(conn *temporalv1beta1.Connection) []ctrl.Request {
 			mapper := &NamespaceReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.Namespace{},
+					WithIndex(&temporalv1beta1.Namespace{},
 						namespaceConnectionRefIndex, indexNamespaceByConnection).
 					WithObjects(stored()).
 					Build(),
@@ -1549,7 +1549,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition().Reason).To(Equal(ReasonCreated))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 		})
 
 		It("should be woken when its Connection becomes Ready", func() {
@@ -1565,7 +1565,7 @@ var _ = Describe("Namespace Controller", func() {
 			connKey := types.NamespacedName{Name: connectionName, Namespace: namespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-				Type:    temporalv1alpha1.ConditionTypeReady,
+				Type:    temporalv1beta1.ConditionTypeReady,
 				Status:  metav1.ConditionTrue,
 				Reason:  ReasonConnected,
 				Message: connectionReadyMessage,
@@ -1617,7 +1617,7 @@ var _ = Describe("Namespace Controller", func() {
 		// it, and it must do so without asking Temporal anything at all.
 		DescribeTable(
 			"should release the finalizer without touching Temporal",
-			func(ownership temporalv1alpha1.NamespaceOwnership) {
+			func(ownership temporalv1beta1.NamespaceOwnership) {
 				createNamespace(nil)
 
 				_, err := reconcile()
@@ -1629,7 +1629,7 @@ var _ = Describe("Namespace Controller", func() {
 					setOwnership(ownership)
 				}
 
-				setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+				setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 				beginDeletion()
 
 				resetTemporalCalls()
@@ -1641,10 +1641,10 @@ var _ = Describe("Namespace Controller", func() {
 				expectNoTemporalContact()
 				Expect(temporalClient.existing).To(HaveKey(name), "the Temporal namespace stays")
 			},
-			Entry("when it created the namespace", temporalv1alpha1.NamespaceOwnershipCreated),
-			Entry("when it was part-way through creating it", temporalv1alpha1.NamespaceOwnershipCreating),
-			Entry("when it adopted the namespace", temporalv1alpha1.NamespaceOwnershipAdopted),
-			Entry("when ownership was never settled", temporalv1alpha1.NamespaceOwnership("")),
+			Entry("when it created the namespace", temporalv1beta1.NamespaceOwnershipCreated),
+			Entry("when it was part-way through creating it", temporalv1beta1.NamespaceOwnershipCreating),
+			Entry("when it adopted the namespace", temporalv1beta1.NamespaceOwnershipAdopted),
+			Entry("when ownership was never settled", temporalv1beta1.NamespaceOwnership("")),
 		)
 
 		It("should leave the ownership marker exactly as it was", func() {
@@ -1656,7 +1656,7 @@ var _ = Describe("Namespace Controller", func() {
 			marker := ownerMarker(currentUID())
 			Expect(temporalClient.existing[name].Data).To(Equal(marker))
 
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 			beginDeletion()
 
 			_, err = reconcile()
@@ -1672,10 +1672,10 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			deleteConnection()
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 			beginDeletion()
 
 			resetTemporalCalls()
@@ -1695,7 +1695,7 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			breakConnection()
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 			beginDeletion()
 
 			resetTemporalCalls()
@@ -1709,13 +1709,13 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should release a namespace another resource owns", func() {
 			createNamespace(nil)
-			putTemporalNamespace(temporalv1alpha1.DefaultRetention, ownerMarker("some-other-uid"))
+			putTemporalNamespace(temporalv1beta1.DefaultRetention, ownerMarker("some-other-uid"))
 
 			_, err := reconcile()
 			Expect(err).To(HaveOccurred())
 			Expect(readyCondition().Reason).To(Equal(ReasonOwnershipConflict))
 
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 			beginDeletion()
 
 			resetTemporalCalls()
@@ -1739,7 +1739,7 @@ var _ = Describe("Namespace Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 
 			deleteConnection()
 			beginDeletion()
@@ -1774,7 +1774,7 @@ var _ = Describe("Namespace Controller", func() {
 			// changed, which is what makes this the recovery path rather than
 			// an annotation.
 			By("switching the policy while the resource is terminating")
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyOrphan)
 			Expect(stored().GetDeletionTimestamp().IsZero()).To(BeFalse())
 
 			resetTemporalCalls()
@@ -1801,9 +1801,9 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(temporalClient.created).To(HaveLen(1))
 
-			for _, policy := range []temporalv1alpha1.NamespaceDeletionPolicy{
-				temporalv1alpha1.NamespaceDeletionPolicyOrphan,
-				temporalv1alpha1.NamespaceDeletionPolicyDelete,
+			for _, policy := range []temporalv1beta1.NamespaceDeletionPolicy{
+				temporalv1beta1.NamespaceDeletionPolicyOrphan,
+				temporalv1beta1.NamespaceDeletionPolicyDelete,
 			} {
 				setDeletionPolicy(policy)
 
@@ -1816,7 +1816,7 @@ var _ = Describe("Namespace Controller", func() {
 				Expect(temporalClient.created).To(HaveLen(1), "no re-creation")
 				Expect(temporalClient.updated).To(BeEmpty(), "no reconfiguration")
 				Expect(temporalClient.deleted).To(BeEmpty(), "no deletion")
-				Expect(ownership()).To(Equal(temporalv1alpha1.NamespaceOwnershipCreated))
+				Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
 				Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
 			}
 		})
@@ -1846,14 +1846,14 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should not panic when the optional fields are absent", func() {
-			ns := &temporalv1alpha1.Namespace{
+			ns := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec: temporalv1alpha1.NamespaceSpec{
+				Spec: temporalv1beta1.NamespaceSpec{
 					ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 				},
 			}
 			Expect(ns.Spec.Retention).To(BeNil())
-			Expect(ns.Spec.RetentionDuration()).To(Equal(temporalv1alpha1.DefaultRetention))
+			Expect(ns.Spec.RetentionDuration()).To(Equal(temporalv1beta1.DefaultRetention))
 			Expect(ns.Status.Ownership).To(BeEmpty())
 			Expect(ns.Status.Ownership.OwnsTemporalNamespace()).To(BeFalse())
 			Expect(ns.Status.Ownership.IsEstablished()).To(BeFalse())
@@ -1867,15 +1867,15 @@ var _ = Describe("Namespace Controller", func() {
 
 		It("should treat an unset deletion policy as Delete without admission", func() {
 			// Built in memory, so nothing has defaulted it.
-			ns := &temporalv1alpha1.Namespace{
-				Spec: temporalv1alpha1.NamespaceSpec{
+			ns := &temporalv1beta1.Namespace{
+				Spec: temporalv1beta1.NamespaceSpec{
 					ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 				},
 			}
 			Expect(ns.Spec.DeletionPolicy).To(BeEmpty())
-			Expect(ns.Spec.DeletionPolicyValue()).To(Equal(temporalv1alpha1.NamespaceDeletionPolicyDelete))
-			Expect(temporalv1alpha1.DefaultDeletionPolicy).
-				To(Equal(temporalv1alpha1.NamespaceDeletionPolicyDelete))
+			Expect(ns.Spec.DeletionPolicyValue()).To(Equal(temporalv1beta1.NamespaceDeletionPolicyDelete))
+			Expect(temporalv1beta1.DefaultDeletionPolicy).
+				To(Equal(temporalv1beta1.NamespaceDeletionPolicyDelete))
 		})
 
 		It("should default the deletion policy to Delete at admission", func() {
@@ -1883,7 +1883,7 @@ var _ = Describe("Namespace Controller", func() {
 			createNamespace(nil)
 
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.NamespaceDeletionPolicyDelete))
+				To(Equal(temporalv1beta1.NamespaceDeletionPolicyDelete))
 		})
 
 		It("should delete an owned namespace when Delete is set explicitly", func() {
@@ -1893,7 +1893,7 @@ var _ = Describe("Namespace Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			setDeletionPolicy(temporalv1alpha1.NamespaceDeletionPolicyDelete)
+			setDeletionPolicy(temporalv1beta1.NamespaceDeletionPolicyDelete)
 			beginDeletion()
 
 			_, err = reconcile()
@@ -1905,11 +1905,11 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should reject a deletion policy the API does not define", func() {
-			ns := &temporalv1alpha1.Namespace{
+			ns := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec: temporalv1alpha1.NamespaceSpec{
+				Spec: temporalv1beta1.NamespaceSpec{
 					ConnectionRef:  corev1.LocalObjectReference{Name: connectionName},
-					DeletionPolicy: temporalv1alpha1.NamespaceDeletionPolicy("Abandon"),
+					DeletionPolicy: temporalv1beta1.NamespaceDeletionPolicy("Abandon"),
 				},
 			}
 
@@ -1919,9 +1919,9 @@ var _ = Describe("Namespace Controller", func() {
 		})
 
 		It("should be rejected by the API server without a connectionRef name", func() {
-			ns := &temporalv1alpha1.Namespace{
+			ns := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-				Spec:       temporalv1alpha1.NamespaceSpec{},
+				Spec:       temporalv1beta1.NamespaceSpec{},
 			}
 
 			err := k8sClient.Create(ctx, ns)
@@ -1934,7 +1934,7 @@ var _ = Describe("Namespace Controller", func() {
 			createNamespace(nil)
 
 			ns := stored()
-			ns.Status.Ownership = temporalv1alpha1.NamespaceOwnership("Borrowed")
+			ns.Status.Ownership = temporalv1beta1.NamespaceOwnership("Borrowed")
 
 			err := k8sClient.Status().Update(ctx, ns)
 			Expect(err).To(HaveOccurred())

@@ -3,7 +3,7 @@
 #
 # metadata.name is Kubernetes identity; spec.name is what Temporal is asked for.
 # Nexus endpoint names are unique across the whole Service, not per namespace.
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: NexusEndpoint
 metadata:
   labels:

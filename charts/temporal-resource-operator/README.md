@@ -57,19 +57,22 @@ should survive.
 ## Custom resource definitions
 
 The four CRDs (`Connection`, `Namespace`, `SearchAttribute`, `NexusEndpoint`)
-ship in the chart's `crds/` directory. That is the standard Helm arrangement,
-and it comes with Helm's standard limitation:
+ship in the chart's `crds/` directory, and each serves exactly one API version,
+`temporal.simonemms.com/v1beta1`. That is the standard Helm arrangement, and it
+comes with Helm's standard limitation:
 
 * CRDs are installed on first install, if they are not already present
 * CRDs are **not** upgraded by `helm upgrade`
 * CRDs are **not** removed by `helm uninstall`
 
 So a release that changes a CRD needs the new definitions applied by hand
-before or during the upgrade:
+before or during the upgrade. They travel inside the chart, so take them from
+the version you are upgrading to:
 
 ```sh
-kubectl apply --server-side -f \
-  https://raw.githubusercontent.com/mrsimonemms/temporal-resource-operator/<tag>/charts/temporal-resource-operator/crds/
+helm pull oci://ghcr.io/mrsimonemms/charts/temporal-resource-operator \
+  --version <version> --untar
+kubectl apply --server-side -f temporal-resource-operator/crds/
 ```
 
 Leaving CRDs behind on uninstall is deliberate on Helm's part — deleting a CRD
@@ -83,8 +86,9 @@ kubectl delete crd connections.temporal.simonemms.com \
   nexusendpoints.temporal.simonemms.com
 ```
 
-The chart's CRDs are copies of the ones generated from the Kubebuilder markers
-in `api/v1alpha1`. CI fails if the two ever drift.
+The chart's CRDs are not hand-written. They are generated from the Kubebuilder
+markers in `api/v1beta1`, copied into the chart at build time, and CI fails if
+the packaged copies do not match the generated source.
 
 ## Values
 

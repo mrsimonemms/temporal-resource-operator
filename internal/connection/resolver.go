@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 )
 
 var (
@@ -78,7 +78,7 @@ func (r *Resolver) Resolve(
 	namespace string,
 	ref corev1.LocalObjectReference,
 ) (*client.Options, error) {
-	conn := &temporalv1alpha1.Connection{}
+	conn := &temporalv1beta1.Connection{}
 	key := types.NamespacedName{Namespace: namespace, Name: ref.Name}
 
 	if err := r.client.Get(ctx, key, conn); err != nil {
@@ -92,7 +92,7 @@ func (r *Resolver) Resolve(
 // used to dial the Temporal Service it describes.
 func (r *Resolver) ResolveConnection(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 ) (*client.Options, error) {
 	if conn == nil {
 		return nil, ErrNoConnection
@@ -129,8 +129,8 @@ func (r *Resolver) ResolveConnection(
 // callers do not need to guard the optional fields.
 func (r *Resolver) credentials(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
-) (*temporalv1alpha1.Credentials, error) {
+	conn *temporalv1beta1.Connection,
+) (*temporalv1beta1.Credentials, error) {
 	spec := conn.Spec
 
 	switch {
@@ -142,7 +142,7 @@ func (r *Resolver) credentials(
 		return r.credentialsFromSecret(ctx, conn.Namespace, *spec.CredentialsSecretRef)
 	default:
 		// An unauthenticated connection - a local dev server, typically.
-		return &temporalv1alpha1.Credentials{}, nil
+		return &temporalv1beta1.Credentials{}, nil
 	}
 }
 
@@ -152,7 +152,7 @@ func (r *Resolver) credentialsFromSecret(
 	ctx context.Context,
 	namespace string,
 	ref corev1.LocalObjectReference,
-) (*temporalv1alpha1.Credentials, error) {
+) (*temporalv1beta1.Credentials, error) {
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: namespace, Name: ref.Name}
 
@@ -163,10 +163,10 @@ func (r *Resolver) credentialsFromSecret(
 		return nil, fmt.Errorf("getting credentials secret %s: %w", key, err)
 	}
 
-	creds := &temporalv1alpha1.Credentials{
-		APIKey:     string(secret.Data[temporalv1alpha1.SecretKeyAPIKey]),
-		ClientCert: string(secret.Data[temporalv1alpha1.SecretKeyClientCert]),
-		ClientKey:  string(secret.Data[temporalv1alpha1.SecretKeyClientKey]),
+	creds := &temporalv1beta1.Credentials{
+		APIKey:     string(secret.Data[temporalv1beta1.SecretKeyAPIKey]),
+		ClientCert: string(secret.Data[temporalv1beta1.SecretKeyClientCert]),
+		ClientKey:  string(secret.Data[temporalv1beta1.SecretKeyClientKey]),
 	}
 
 	if creds.APIKey == "" && creds.ClientCert == "" && creds.ClientKey == "" {
@@ -182,7 +182,7 @@ func (r *Resolver) credentialsFromSecret(
 // TLS is implied - not just by spec.tls - by anything that cannot work without
 // it. An API key alone is not enough: the Temporal SDK enables TLS itself when
 // an API key is supplied and TLS has not been configured.
-func tlsConfig(spec temporalv1alpha1.ConnectionSpec, creds *temporalv1alpha1.Credentials) (*tls.Config, error) {
+func tlsConfig(spec temporalv1beta1.ConnectionSpec, creds *temporalv1beta1.Credentials) (*tls.Config, error) {
 	hasClientCert := creds.ClientCert != "" || creds.ClientKey != ""
 
 	if !spec.TLS && spec.TLSServerName == "" && !hasClientCert {

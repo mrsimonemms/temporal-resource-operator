@@ -36,7 +36,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -104,7 +104,7 @@ type SearchAttributeReconciler struct {
 func (r *SearchAttributeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	attribute := &temporalv1alpha1.SearchAttribute{}
+	attribute := &temporalv1beta1.SearchAttribute{}
 	if err := r.Get(ctx, req.NamespacedName, attribute); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted, or the cache is behind. Either way there is nothing to
@@ -135,7 +135,7 @@ func (r *SearchAttributeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	reason, message, reconcileErr := r.reconcileSearchAttribute(ctx, attribute)
 
 	condition := &metav1.Condition{
-		Type:               temporalv1alpha1.ConditionTypeReady,
+		Type:               temporalv1beta1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            message,
@@ -181,7 +181,7 @@ func isDependencyReason(reason string) bool {
 // the spec, returning the reason and, on success, the message to report.
 func (r *SearchAttributeReconciler) reconcileSearchAttribute(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 ) (reason, message string, err error) {
 	conn, reason, err := r.readyDependencies(ctx, attribute)
 	if err != nil {
@@ -215,7 +215,7 @@ func (r *SearchAttributeReconciler) reconcileSearchAttribute(
 // reconcileExistingSearchAttribute settles ownership of a search attribute that
 // already exists, refusing to touch one whose type does not match.
 func (r *SearchAttributeReconciler) reconcileExistingSearchAttribute(
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 	actual *temporal.SearchAttribute,
 	desired temporal.SearchAttributeType,
 ) (reason, message string, err error) {
@@ -258,7 +258,7 @@ func (r *SearchAttributeReconciler) reconcileExistingSearchAttribute(
 // make it the operator's to delete.
 func (r *SearchAttributeReconciler) createSearchAttribute(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 	temporalClient TemporalSearchAttributeClient,
 	desired temporal.SearchAttributeType,
 ) (reason, message string, err error) {
@@ -266,7 +266,7 @@ func (r *SearchAttributeReconciler) createSearchAttribute(
 
 	if establishing {
 		if err := r.persistSearchAttributeOwnership(
-			ctx, attribute, temporalv1alpha1.SearchAttributeOwnershipCreating,
+			ctx, attribute, temporalv1beta1.SearchAttributeOwnershipCreating,
 		); err != nil {
 			return ReasonCreateFailed, "", fmt.Errorf("recording intent to create search attribute: %w", err)
 		}
@@ -283,7 +283,7 @@ func (r *SearchAttributeReconciler) createSearchAttribute(
 		// Settled in memory; the caller's status write persists it alongside
 		// the Ready condition. Should that write fail, ownership stays at
 		// Creating and the next reconcile resolves it to Created.
-		attribute.Status.Ownership = temporalv1alpha1.SearchAttributeOwnershipCreated
+		attribute.Status.Ownership = temporalv1beta1.SearchAttributeOwnershipCreated
 	}
 
 	return ReasonCreated, fmt.Sprintf(
@@ -306,18 +306,18 @@ func (r *SearchAttributeReconciler) createSearchAttribute(
 // as Created is the deliberate choice, because the alternative would make the
 // marker useless for the failure it exists to survive. A type that does not
 // match is caught before this is ever reached.
-func establishSearchAttributeOwnership(attribute *temporalv1alpha1.SearchAttribute) bool {
+func establishSearchAttributeOwnership(attribute *temporalv1beta1.SearchAttribute) bool {
 	if attribute.Status.Ownership.IsEstablished() {
 		return false
 	}
 
-	if attribute.Status.Ownership == temporalv1alpha1.SearchAttributeOwnershipCreating {
-		attribute.Status.Ownership = temporalv1alpha1.SearchAttributeOwnershipCreated
+	if attribute.Status.Ownership == temporalv1beta1.SearchAttributeOwnershipCreating {
+		attribute.Status.Ownership = temporalv1beta1.SearchAttributeOwnershipCreated
 
 		return false
 	}
 
-	attribute.Status.Ownership = temporalv1alpha1.SearchAttributeOwnershipAdopted
+	attribute.Status.Ownership = temporalv1beta1.SearchAttributeOwnershipAdopted
 
 	return true
 }
@@ -334,12 +334,12 @@ func establishSearchAttributeOwnership(attribute *temporalv1alpha1.SearchAttribu
 //nolint:dupl // mirrors Namespace.finalise on purpose; see above
 func (r *SearchAttributeReconciler) finalise(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
-	observed *temporalv1alpha1.SearchAttributeStatus,
+	attribute *temporalv1beta1.SearchAttribute,
+	observed *temporalv1beta1.SearchAttributeStatus,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	if !controllerutil.ContainsFinalizer(attribute, temporalv1alpha1.SearchAttributeFinalizer) {
+	if !controllerutil.ContainsFinalizer(attribute, temporalv1beta1.SearchAttributeFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
@@ -350,7 +350,7 @@ func (r *SearchAttributeReconciler) finalise(
 	// Connection. It is the way out of a deletion that would otherwise be
 	// blocked, so it must not depend on any of the machinery that could be what
 	// is broken.
-	if policy := attribute.Spec.DeletionPolicyValue(); policy == temporalv1alpha1.SearchAttributeDeletionPolicyOrphan {
+	if policy := attribute.Spec.DeletionPolicyValue(); policy == temporalv1beta1.SearchAttributeDeletionPolicyOrphan {
 		log.Info("Leaving Temporal search attribute in place",
 			"searchAttribute", name, "deletionPolicy", string(policy))
 
@@ -371,7 +371,7 @@ func (r *SearchAttributeReconciler) finalise(
 			"searchAttribute", name, "reason", reason)
 
 		condition := &metav1.Condition{
-			Type:               temporalv1alpha1.ConditionTypeReady,
+			Type:               temporalv1beta1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            err.Error(),
@@ -398,7 +398,7 @@ func (r *SearchAttributeReconciler) finalise(
 // the only way to know, and that is what this does.
 func (r *SearchAttributeReconciler) deleteSearchAttribute(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
@@ -456,8 +456,8 @@ func (r *SearchAttributeReconciler) deleteSearchAttribute(
 //nolint:dupl // parallel with the sibling controllers on purpose; see dependency.go
 func (r *SearchAttributeReconciler) readyDependencies(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
-) (*temporalv1alpha1.Connection, string, error) {
+	attribute *temporalv1beta1.SearchAttribute,
+) (*temporalv1beta1.Connection, string, error) {
 	conn, reason, err := getConnection(ctx, r.Client, attribute.Spec.ConnectionRef.Name, attribute.Namespace)
 	if err != nil {
 		return nil, reason, err
@@ -468,7 +468,7 @@ func (r *SearchAttributeReconciler) readyDependencies(
 		return nil, reason, err
 	}
 
-	namespace := &temporalv1alpha1.Namespace{}
+	namespace := &temporalv1beta1.Namespace{}
 	key := types.NamespacedName{Namespace: attribute.Namespace, Name: attribute.Spec.NamespaceRef.Name}
 
 	if err := r.Get(ctx, key, namespace); err != nil {
@@ -495,7 +495,7 @@ func readyCondition(
 	key types.NamespacedName,
 	notReady string,
 ) (string, error) {
-	ready := meta.FindStatusCondition(conditions, temporalv1alpha1.ConditionTypeReady)
+	ready := meta.FindStatusCondition(conditions, temporalv1beta1.ConditionTypeReady)
 
 	switch {
 	case ready == nil:
@@ -511,7 +511,7 @@ func readyCondition(
 // describes.
 func (r *SearchAttributeReconciler) temporalClient(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 ) (TemporalSearchAttributeClient, string, error) {
 	opts, err := r.Resolver.ResolveConnection(ctx, conn)
 	if err != nil {
@@ -538,11 +538,11 @@ func (r *SearchAttributeReconciler) temporalClient(
 // ensureFinalizer adds the finalizer if it is missing.
 func (r *SearchAttributeReconciler) ensureFinalizer(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 ) error {
 	patch := searchAttributeFinalizerPatch(attribute)
 
-	if !controllerutil.AddFinalizer(attribute, temporalv1alpha1.SearchAttributeFinalizer) {
+	if !controllerutil.AddFinalizer(attribute, temporalv1beta1.SearchAttributeFinalizer) {
 		return nil
 	}
 
@@ -553,11 +553,11 @@ func (r *SearchAttributeReconciler) ensureFinalizer(
 // remove the resource.
 func (r *SearchAttributeReconciler) removeSearchAttributeFinalizer(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
+	attribute *temporalv1beta1.SearchAttribute,
 ) error {
 	patch := searchAttributeFinalizerPatch(attribute)
 
-	if !controllerutil.RemoveFinalizer(attribute, temporalv1alpha1.SearchAttributeFinalizer) {
+	if !controllerutil.RemoveFinalizer(attribute, temporalv1beta1.SearchAttributeFinalizer) {
 		return nil
 	}
 
@@ -570,7 +570,7 @@ func (r *SearchAttributeReconciler) removeSearchAttributeFinalizer(
 // A full update would round-trip the spec, and the API server would read the
 // re-marshalled result as a change and bump the generation, waking the
 // controller again for no reason.
-func searchAttributeFinalizerPatch(attribute *temporalv1alpha1.SearchAttribute) client.Patch {
+func searchAttributeFinalizerPatch(attribute *temporalv1beta1.SearchAttribute) client.Patch {
 	return client.MergeFromWithOptions(attribute.DeepCopy(), client.MergeFromWithOptimisticLock{})
 }
 
@@ -579,8 +579,8 @@ func searchAttributeFinalizerPatch(attribute *temporalv1alpha1.SearchAttribute) 
 // describes is made.
 func (r *SearchAttributeReconciler) persistSearchAttributeOwnership(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
-	ownership temporalv1alpha1.SearchAttributeOwnership,
+	attribute *temporalv1beta1.SearchAttribute,
+	ownership temporalv1beta1.SearchAttributeOwnership,
 ) error {
 	if attribute.Status.Ownership == ownership {
 		return nil
@@ -595,8 +595,8 @@ func (r *SearchAttributeReconciler) persistSearchAttributeOwnership(
 // status already says the same thing.
 func (r *SearchAttributeReconciler) updateSearchAttributeStatus(
 	ctx context.Context,
-	attribute *temporalv1alpha1.SearchAttribute,
-	observed *temporalv1alpha1.SearchAttributeStatus,
+	attribute *temporalv1beta1.SearchAttribute,
+	observed *temporalv1beta1.SearchAttributeStatus,
 	condition *metav1.Condition,
 ) error {
 	meta.SetStatusCondition(&attribute.Status.Conditions, *condition)
@@ -612,7 +612,7 @@ func (r *SearchAttributeReconciler) updateSearchAttributeStatus(
 // indexSearchAttributeByConnection extracts the Connection a SearchAttribute
 // references.
 func indexSearchAttributeByConnection(obj client.Object) []string {
-	return searchAttributeRef(obj, func(spec temporalv1alpha1.SearchAttributeSpec) string {
+	return searchAttributeRef(obj, func(spec temporalv1beta1.SearchAttributeSpec) string {
 		return spec.ConnectionRef.Name
 	})
 }
@@ -620,7 +620,7 @@ func indexSearchAttributeByConnection(obj client.Object) []string {
 // indexSearchAttributeByNamespace extracts the Namespace a SearchAttribute
 // references.
 func indexSearchAttributeByNamespace(obj client.Object) []string {
-	return searchAttributeRef(obj, func(spec temporalv1alpha1.SearchAttributeSpec) string {
+	return searchAttributeRef(obj, func(spec temporalv1beta1.SearchAttributeSpec) string {
 		return spec.NamespaceRef.Name
 	})
 }
@@ -631,8 +631,8 @@ func indexSearchAttributeByNamespace(obj client.Object) []string {
 // half-built or of the wrong type, so it never assumes anything about what it
 // is handed. An unset reference is left out of the index rather than filed
 // under the empty string.
-func searchAttributeRef(obj client.Object, ref func(temporalv1alpha1.SearchAttributeSpec) string) []string {
-	attribute, ok := obj.(*temporalv1alpha1.SearchAttribute)
+func searchAttributeRef(obj client.Object, ref func(temporalv1beta1.SearchAttributeSpec) string) []string {
+	attribute, ok := obj.(*temporalv1beta1.SearchAttribute)
 	if !ok || attribute == nil {
 		return nil
 	}
@@ -655,7 +655,7 @@ func (r *SearchAttributeReconciler) searchAttributesForDependency(
 	index string,
 ) handler.MapFunc {
 	return func(ctx context.Context, dependency client.Object) []ctrl.Request {
-		return dependants(ctx, r.Client, &temporalv1alpha1.SearchAttributeList{}, index, dependency)
+		return dependants(ctx, r.Client, &temporalv1beta1.SearchAttributeList{}, index, dependency)
 	}
 }
 
@@ -679,7 +679,7 @@ func (r *SearchAttributeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// The cache has not started yet, so this only registers the indexer and
 		// returns; there is nothing for a caller's context to cancel.
 		if err := mgr.GetFieldIndexer().IndexField(
-			context.Background(), &temporalv1alpha1.SearchAttribute{}, field, extract,
+			context.Background(), &temporalv1beta1.SearchAttribute{}, field, extract,
 		); err != nil {
 			return fmt.Errorf("indexing search attributes by %s: %w", field, err)
 		}
@@ -689,20 +689,20 @@ func (r *SearchAttributeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Only the spec matters here, so ignore the status writes this
 		// controller makes itself. Kubernetes bumps the generation when it
 		// stamps a deletion timestamp, so the finalizer flow still runs.
-		For(&temporalv1alpha1.SearchAttribute{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&temporalv1beta1.SearchAttribute{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Wake dependants as soon as a dependency changes. Both watches are
 		// deliberately unfiltered: readiness lives in status, so the generation
 		// predicate guarding the primary resource above would discard precisely
 		// the events that matter - and predicates passed to For() apply only to
 		// For(), so it does not reach these of its own accord.
 		Watches(
-			&temporalv1alpha1.Connection{},
+			&temporalv1beta1.Connection{},
 			handler.EnqueueRequestsFromMapFunc(
 				r.searchAttributesForDependency(searchAttributeConnectionRefIndex),
 			),
 		).
 		Watches(
-			&temporalv1alpha1.Namespace{},
+			&temporalv1beta1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(
 				r.searchAttributesForDependency(searchAttributeNamespaceRefIndex),
 			),

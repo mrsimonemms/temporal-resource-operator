@@ -4,7 +4,7 @@
 # metadata.name is Kubernetes identity; spec.name is what Temporal is asked for.
 # They differ because Kubernetes only accepts lowercase resource names, while
 # Temporal search attributes are conventionally PascalCase.
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   labels:
@@ -24,7 +24,7 @@ spec:
 ---
 # An attribute that already existed on the Temporal namespace. The operator
 # keeps it in step but never removes it, whatever the deletion policy says.
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   labels:

@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -177,35 +177,35 @@ var _ = Describe("SearchAttribute Controller", func() {
 		return reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 	}
 
-	stored := func() *temporalv1alpha1.SearchAttribute {
-		attribute := &temporalv1alpha1.SearchAttribute{}
+	stored := func() *temporalv1beta1.SearchAttribute {
+		attribute := &temporalv1beta1.SearchAttribute{}
 		Expect(k8sClient.Get(ctx, key, attribute)).To(Succeed())
 
 		return attribute
 	}
 
 	readyCondition := func() *metav1.Condition {
-		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1alpha1.ConditionTypeReady)
+		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1beta1.ConditionTypeReady)
 	}
 
-	ownership := func() temporalv1alpha1.SearchAttributeOwnership {
+	ownership := func() temporalv1beta1.SearchAttributeOwnership {
 		return stored().Status.Ownership
 	}
 
 	hasFinalizer := func() bool {
-		return controllerutil.ContainsFinalizer(stored(), temporalv1alpha1.SearchAttributeFinalizer)
+		return controllerutil.ContainsFinalizer(stored(), temporalv1beta1.SearchAttributeFinalizer)
 	}
 
 	isGone := func() bool {
-		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1alpha1.SearchAttribute{}))
+		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1beta1.SearchAttribute{}))
 	}
 
 	// createConnection persists a Connection and, when status is non-empty,
 	// gives it a Ready condition with that status.
-	createConnection := func(status metav1.ConditionStatus) *temporalv1alpha1.Connection {
-		conn := &temporalv1alpha1.Connection{
+	createConnection := func(status metav1.ConditionStatus) *temporalv1beta1.Connection {
+		conn := &temporalv1beta1.Connection{
 			ObjectMeta: metav1.ObjectMeta{Name: connectionName, Namespace: k8sNamespace},
-			Spec:       temporalv1alpha1.ConnectionSpec{Address: address},
+			Spec:       temporalv1beta1.ConnectionSpec{Address: address},
 		}
 		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
@@ -214,7 +214,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		}
 
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:    temporalv1alpha1.ConditionTypeReady,
+			Type:    temporalv1beta1.ConditionTypeReady,
 			Status:  status,
 			Reason:  ReasonConnected,
 			Message: connectionReadyMessage,
@@ -226,10 +226,10 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 	// createTemporalNamespace persists a Namespace resource whose metadata.name
 	// is the Temporal namespace the attribute lives in.
-	createTemporalNamespace := func(status metav1.ConditionStatus) *temporalv1alpha1.Namespace {
-		ns := &temporalv1alpha1.Namespace{
+	createTemporalNamespace := func(status metav1.ConditionStatus) *temporalv1beta1.Namespace {
+		ns := &temporalv1beta1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: temporalNamespace, Namespace: k8sNamespace},
-			Spec: temporalv1alpha1.NamespaceSpec{
+			Spec: temporalv1beta1.NamespaceSpec{
 				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 			},
 		}
@@ -240,7 +240,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		}
 
 		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
-			Type:    temporalv1alpha1.ConditionTypeReady,
+			Type:    temporalv1beta1.ConditionTypeReady,
 			Status:  status,
 			Reason:  ReasonCreated,
 			Message: "Registered Temporal namespace",
@@ -251,10 +251,10 @@ var _ = Describe("SearchAttribute Controller", func() {
 	}
 
 	// createSearchAttribute persists a SearchAttribute of the given type.
-	createSearchAttribute := func(attrType temporalv1alpha1.SearchAttributeType) *temporalv1alpha1.SearchAttribute {
-		attribute := &temporalv1alpha1.SearchAttribute{
+	createSearchAttribute := func(attrType temporalv1beta1.SearchAttributeType) *temporalv1beta1.SearchAttribute {
+		attribute := &temporalv1beta1.SearchAttribute{
 			ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: k8sNamespace},
-			Spec: temporalv1alpha1.SearchAttributeSpec{
+			Spec: temporalv1beta1.SearchAttributeSpec{
 				Name:          attributeName,
 				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 				NamespaceRef:  corev1.LocalObjectReference{Name: temporalNamespace},
@@ -274,13 +274,13 @@ var _ = Describe("SearchAttribute Controller", func() {
 		temporalClient.existing[temporalNamespace][attributeName] = attrType
 	}
 
-	setOwnership := func(value temporalv1alpha1.SearchAttributeOwnership) {
+	setOwnership := func(value temporalv1beta1.SearchAttributeOwnership) {
 		attribute := stored()
 		attribute.Status.Ownership = value
 		Expect(k8sClient.Status().Update(ctx, attribute)).To(Succeed())
 	}
 
-	setDeletionPolicy := func(policy temporalv1alpha1.SearchAttributeDeletionPolicy) {
+	setDeletionPolicy := func(policy temporalv1beta1.SearchAttributeDeletionPolicy) {
 		attribute := stored()
 		attribute.Spec.DeletionPolicy = policy
 		Expect(k8sClient.Update(ctx, attribute)).To(Succeed())
@@ -336,19 +336,19 @@ var _ = Describe("SearchAttribute Controller", func() {
 	})
 
 	AfterEach(func() {
-		attribute := &temporalv1alpha1.SearchAttribute{}
+		attribute := &temporalv1beta1.SearchAttribute{}
 		if err := k8sClient.Get(ctx, key, attribute); err == nil {
-			if controllerutil.RemoveFinalizer(attribute, temporalv1alpha1.SearchAttributeFinalizer) {
+			if controllerutil.RemoveFinalizer(attribute, temporalv1beta1.SearchAttributeFinalizer) {
 				Expect(k8sClient.Update(ctx, attribute)).To(Succeed())
 			}
 			Expect(ctrlclient.IgnoreNotFound(k8sClient.Delete(ctx, attribute))).To(Succeed())
 		}
 
 		for _, obj := range []ctrlclient.Object{
-			&temporalv1alpha1.Connection{
+			&temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionName, Namespace: k8sNamespace},
 			},
-			&temporalv1alpha1.Namespace{
+			&temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: temporalNamespace, Namespace: k8sNamespace},
 			},
 		} {
@@ -372,7 +372,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			"should wait rather than contacting Temporal",
 			func(setup func(), reason string) {
 				setup()
-				createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+				createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 				result, err := reconcile()
 				Expect(err).NotTo(HaveOccurred(), "a missing dependency is not a controller failure")
@@ -406,7 +406,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 		It("should proceed once the dependencies come good", func() {
 			createConnection(metav1.ConditionTrue)
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -429,7 +429,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should register a missing search attribute", func() {
-			attribute := createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeywordList)
+			attribute := createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeywordList)
 
 			result, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -442,7 +442,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			}}), "the requested type should reach Temporal unchanged")
 			Expect(temporalClient.closed).To(BeTrue())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 
 			condition := readyCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -451,9 +451,9 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should persist Creating before asking Temporal to register anything", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
-			var ownershipAtCreate temporalv1alpha1.SearchAttributeOwnership
+			var ownershipAtCreate temporalv1beta1.SearchAttributeOwnership
 			temporalClient.createErr = nil
 			original := reconciler.Connect
 			reconciler.Connect = func(c context.Context, o *sdkclient.Options) (TemporalSearchAttributeClient, error) {
@@ -471,19 +471,19 @@ var _ = Describe("SearchAttribute Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownershipAtCreate).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreating),
+			Expect(ownershipAtCreate).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreating),
 				"the intent to create must be durable before the attribute is registered")
 		})
 
 		It("should adopt an existing attribute of the same type", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(BeEmpty(), "an existing attribute must not be re-registered")
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipAdopted))
 
 			condition := readyCondition()
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -491,23 +491,23 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should keep ownership stable across repeated reconciles", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 			Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
 			Expect(temporalClient.created).To(HaveLen(1))
 		})
 
 		It("should recover Created from the Creating marker when the status write fails", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
-			setOwnership(temporalv1alpha1.SearchAttributeOwnershipCreating)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
+			setOwnership(temporalv1beta1.SearchAttributeOwnershipCreating)
 
 			// The attribute is there with exactly the requested type, which is
 			// the state an interrupted create leaves behind.
@@ -516,13 +516,13 @@ var _ = Describe("SearchAttribute Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated),
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated),
 				"an interrupted create must not be mistaken for an adoption")
 			Expect(temporalClient.created).To(BeEmpty())
 		})
 
 		It("should not rewrite an unchanged status", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -539,7 +539,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should report CreateFailed when Temporal refuses", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			temporalClient.createErr = errors.New("reserved by system")
 
 			_, err := reconcile()
@@ -552,7 +552,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should report DescribeFailed without creating anything", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			temporalClient.describeErr = errors.New("permission denied")
 
 			_, err := reconcile()
@@ -564,11 +564,11 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should recreate an externally removed attribute and stay Created", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 
 			delete(temporalClient.existing[temporalNamespace], attributeName)
 
@@ -576,16 +576,16 @@ var _ = Describe("SearchAttribute Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(HaveLen(2), "the attribute should be put back")
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 		})
 
 		It("should recreate an externally removed adopted attribute and stay Adopted", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipAdopted))
 
 			delete(temporalClient.existing[temporalNamespace], attributeName)
 
@@ -593,7 +593,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(HaveLen(1), "the attribute should be put back")
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipAdopted),
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipAdopted),
 				"restoring someone else's attribute does not make it the operator's to delete")
 		})
 	})
@@ -605,7 +605,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should report a conflict and leave the attribute alone", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeText)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeText)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
@@ -624,8 +624,8 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should refuse even when it believes it created the attribute", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeText)
-			setOwnership(temporalv1alpha1.SearchAttributeOwnershipCreating)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeText)
+			setOwnership(temporalv1beta1.SearchAttributeOwnershipCreating)
 
 			// A Creating marker is not evidence when the type is wrong: the
 			// operator would have registered it with the type it asked for.
@@ -635,7 +635,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			Expect(err).To(HaveOccurred())
 
 			Expect(readyCondition().Reason).To(Equal(ReasonTypeConflict))
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreating),
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreating),
 				"a conflict settles nothing")
 		})
 	})
@@ -647,11 +647,11 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should remove an attribute it registered", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 
 			beginDeletion()
 
@@ -666,12 +666,12 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should leave an adopted attribute alone", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipAdopted))
 
 			beginDeletion()
 			resetTemporalCalls()
@@ -686,14 +686,14 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 		DescribeTable(
 			"should release without contacting Temporal under Orphan",
-			func(ownershipValue temporalv1alpha1.SearchAttributeOwnership) {
-				createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			func(ownershipValue temporalv1beta1.SearchAttributeOwnership) {
+				createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 				_, err := reconcile()
 				Expect(err).NotTo(HaveOccurred())
 
 				setOwnership(ownershipValue)
-				setDeletionPolicy(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan)
+				setDeletionPolicy(temporalv1beta1.SearchAttributeDeletionPolicyOrphan)
 				beginDeletion()
 				resetTemporalCalls()
 
@@ -704,23 +704,23 @@ var _ = Describe("SearchAttribute Controller", func() {
 				Expect(temporalClient.existing[temporalNamespace]).To(HaveKey(attributeName))
 				Expect(isGone()).To(BeTrue())
 			},
-			Entry("Created", temporalv1alpha1.SearchAttributeOwnershipCreated),
-			Entry("Creating", temporalv1alpha1.SearchAttributeOwnershipCreating),
-			Entry("Adopted", temporalv1alpha1.SearchAttributeOwnershipAdopted),
+			Entry("Created", temporalv1beta1.SearchAttributeOwnershipCreated),
+			Entry("Creating", temporalv1beta1.SearchAttributeOwnershipCreating),
+			Entry("Adopted", temporalv1beta1.SearchAttributeOwnershipAdopted),
 		)
 
 		It("should release under Orphan even with no Connection at all", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			connKey := types.NamespacedName{Name: connectionName, Namespace: k8sNamespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
 
-			setDeletionPolicy(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.SearchAttributeDeletionPolicyOrphan)
 			beginDeletion()
 			resetTemporalCalls()
 
@@ -732,12 +732,12 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should hold the finalizer under Delete when the Connection has gone", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			conn := &temporalv1alpha1.Connection{}
+			conn := &temporalv1beta1.Connection{}
 			connKey := types.NamespacedName{Name: connectionName, Namespace: k8sNamespace}
 			Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
@@ -754,7 +754,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should treat an attribute that has already gone as deleted", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -769,11 +769,11 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should treat a vanished Temporal namespace as deletion already done", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 
 			// The Namespace resource finalised first and took its Temporal
 			// namespace - and every search attribute on it - with it.
@@ -788,14 +788,14 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should still delete when only the Namespace resource has gone", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
 			// The Namespace resource is gone but its Temporal namespace was
 			// orphaned, so the attribute is still there and still ours.
-			ns := &temporalv1alpha1.Namespace{}
+			ns := &temporalv1beta1.Namespace{}
 			nsKey := types.NamespacedName{Name: temporalNamespace, Namespace: k8sNamespace}
 			Expect(k8sClient.Get(ctx, nsKey, ns)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
@@ -812,7 +812,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should hold the finalizer when the removal fails", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -833,7 +833,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should hold the finalizer when Temporal cannot be dialled", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -851,14 +851,14 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should add the finalizer without disturbing the spec", func() {
-			attribute := createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			attribute := createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			Expect(attribute.Generation).To(Equal(int64(1)))
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
 			after := stored()
-			Expect(controllerutil.ContainsFinalizer(after, temporalv1alpha1.SearchAttributeFinalizer)).To(BeTrue())
+			Expect(controllerutil.ContainsFinalizer(after, temporalv1beta1.SearchAttributeFinalizer)).To(BeTrue())
 			Expect(after.Generation).To(Equal(int64(1)),
 				"adding the finalizer must not change the spec")
 		})
@@ -866,25 +866,25 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 	Context("validation and defaulting", func() {
 		It("should default the deletion policy to Delete without admission", func() {
-			spec := temporalv1alpha1.SearchAttributeSpec{}
+			spec := temporalv1beta1.SearchAttributeSpec{}
 			Expect(spec.DeletionPolicy).To(BeEmpty())
 			Expect(spec.DeletionPolicyValue()).
-				To(Equal(temporalv1alpha1.SearchAttributeDeletionPolicyDelete))
-			Expect(temporalv1alpha1.DefaultSearchAttributeDeletionPolicy).
-				To(Equal(temporalv1alpha1.SearchAttributeDeletionPolicyDelete))
+				To(Equal(temporalv1beta1.SearchAttributeDeletionPolicyDelete))
+			Expect(temporalv1beta1.DefaultSearchAttributeDeletionPolicy).
+				To(Equal(temporalv1beta1.SearchAttributeDeletionPolicyDelete))
 		})
 
 		It("should default the deletion policy at admission", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.SearchAttributeDeletionPolicyDelete))
+				To(Equal(temporalv1beta1.SearchAttributeDeletionPolicyDelete))
 		})
 
 		It("should send the Temporal name, never the Kubernetes one", func() {
 			createConnection(metav1.ConditionTrue)
 			createTemporalNamespace(metav1.ConditionTrue)
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			Expect(resourceName).NotTo(Equal(attributeName), "the two names must differ for this to prove anything")
 
@@ -922,7 +922,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			resourceName = "customer-id"
 			key = types.NamespacedName{Name: resourceName, Namespace: k8sNamespace}
 
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
@@ -930,7 +930,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 			Expect(temporalClient.described[0].name).To(Equal("CustomerId"))
 			Expect(temporalClient.created).To(BeEmpty(), "an existing attribute must not be re-registered")
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipAdopted))
 			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition().Reason).To(Equal(ReasonAdopted))
 		})
@@ -943,7 +943,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 			resourceName = "customer-id"
 			key = types.NamespacedName{Name: resourceName, Namespace: k8sNamespace}
 
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeText)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeText)
 			putSearchAttribute("Keyword")
 
 			_, err := reconcile()
@@ -959,7 +959,7 @@ var _ = Describe("SearchAttribute Controller", func() {
 		It("should recreate under the Temporal name after an external removal", func() {
 			createConnection(metav1.ConditionTrue)
 			createTemporalNamespace(metav1.ConditionTrue)
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -971,11 +971,11 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 			Expect(temporalClient.created).To(HaveLen(2))
 			Expect(temporalClient.created[1].name).To(Equal(attributeName))
-			Expect(ownership()).To(Equal(temporalv1alpha1.SearchAttributeOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.SearchAttributeOwnershipCreated))
 		})
 
 		It("should resolve the Temporal namespace from the reference alone", func() {
-			attribute := createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			attribute := createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			Expect(attribute.TemporalName()).To(Equal(attributeName))
 			Expect(attribute.TemporalNamespace()).To(Equal(temporalNamespace),
@@ -984,40 +984,40 @@ var _ = Describe("SearchAttribute Controller", func() {
 
 		DescribeTable(
 			"should be rejected by the API server",
-			func(mutate func(*temporalv1alpha1.SearchAttributeSpec), expected string) {
-				spec := temporalv1alpha1.SearchAttributeSpec{
+			func(mutate func(*temporalv1beta1.SearchAttributeSpec), expected string) {
+				spec := temporalv1beta1.SearchAttributeSpec{
 					Name:          attributeName,
 					ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 					NamespaceRef:  corev1.LocalObjectReference{Name: temporalNamespace},
-					Type:          temporalv1alpha1.SearchAttributeTypeKeyword,
+					Type:          temporalv1beta1.SearchAttributeTypeKeyword,
 				}
 				mutate(&spec)
 
-				err := k8sClient.Create(ctx, &temporalv1alpha1.SearchAttribute{
+				err := k8sClient.Create(ctx, &temporalv1beta1.SearchAttribute{
 					ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: k8sNamespace},
 					Spec:       spec,
 				})
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expected))
 			},
-			Entry("with no connectionRef name", func(s *temporalv1alpha1.SearchAttributeSpec) {
+			Entry("with no connectionRef name", func(s *temporalv1beta1.SearchAttributeSpec) {
 				s.ConnectionRef.Name = ""
 			}, "connectionRef.name is required"),
-			Entry("with no namespaceRef name", func(s *temporalv1alpha1.SearchAttributeSpec) {
+			Entry("with no namespaceRef name", func(s *temporalv1beta1.SearchAttributeSpec) {
 				s.NamespaceRef.Name = ""
 			}, "namespaceRef.name is required"),
-			Entry("with a type the API does not define", func(s *temporalv1alpha1.SearchAttributeSpec) {
-				s.Type = temporalv1alpha1.SearchAttributeType("Blob")
+			Entry("with a type the API does not define", func(s *temporalv1beta1.SearchAttributeSpec) {
+				s.Type = temporalv1beta1.SearchAttributeType("Blob")
 			}, "Unsupported value"),
-			Entry("with a deletion policy the API does not define", func(s *temporalv1alpha1.SearchAttributeSpec) {
-				s.DeletionPolicy = temporalv1alpha1.SearchAttributeDeletionPolicy("Abandon")
+			Entry("with a deletion policy the API does not define", func(s *temporalv1beta1.SearchAttributeSpec) {
+				s.DeletionPolicy = temporalv1beta1.SearchAttributeDeletionPolicy("Abandon")
 			}, "Unsupported value"),
 		)
 
 		DescribeTable(
 			"should refuse to change what the resource points at",
-			func(mutate func(*temporalv1alpha1.SearchAttribute), expected string) {
-				createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			func(mutate func(*temporalv1beta1.SearchAttribute), expected string) {
+				createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 				attribute := stored()
 				mutate(attribute)
@@ -1026,27 +1026,27 @@ var _ = Describe("SearchAttribute Controller", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expected))
 			},
-			Entry("the Temporal name", func(a *temporalv1alpha1.SearchAttribute) {
+			Entry("the Temporal name", func(a *temporalv1beta1.SearchAttribute) {
 				a.Spec.Name = "SomethingElse"
 			}, "name is immutable"),
-			Entry("the Connection", func(a *temporalv1alpha1.SearchAttribute) {
+			Entry("the Connection", func(a *temporalv1beta1.SearchAttribute) {
 				a.Spec.ConnectionRef.Name = "another-connection"
 			}, "connectionRef.name is immutable"),
-			Entry("the Namespace", func(a *temporalv1alpha1.SearchAttribute) {
+			Entry("the Namespace", func(a *temporalv1beta1.SearchAttribute) {
 				a.Spec.NamespaceRef.Name = "another-namespace"
 			}, "namespaceRef.name is immutable"),
-			Entry("the type", func(a *temporalv1alpha1.SearchAttribute) {
-				a.Spec.Type = temporalv1alpha1.SearchAttributeTypeText
+			Entry("the type", func(a *temporalv1beta1.SearchAttribute) {
+				a.Spec.Type = temporalv1beta1.SearchAttributeTypeText
 			}, "type is immutable"),
 		)
 
 		It("should require a Temporal name", func() {
-			err := k8sClient.Create(ctx, &temporalv1alpha1.SearchAttribute{
+			err := k8sClient.Create(ctx, &temporalv1beta1.SearchAttribute{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: k8sNamespace},
-				Spec: temporalv1alpha1.SearchAttributeSpec{
+				Spec: temporalv1beta1.SearchAttributeSpec{
 					ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 					NamespaceRef:  corev1.LocalObjectReference{Name: temporalNamespace},
-					Type:          temporalv1alpha1.SearchAttributeTypeKeyword,
+					Type:          temporalv1beta1.SearchAttributeTypeKeyword,
 				},
 			})
 			Expect(err).To(HaveOccurred())
@@ -1056,26 +1056,26 @@ var _ = Describe("SearchAttribute Controller", func() {
 		It("should keep the deletion policy mutable, terminating or not", func() {
 			createConnection(metav1.ConditionTrue)
 			createTemporalNamespace(metav1.ConditionTrue)
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
 			By("switching it while the resource is live")
-			setDeletionPolicy(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.SearchAttributeDeletionPolicyOrphan)
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan))
+				To(Equal(temporalv1beta1.SearchAttributeDeletionPolicyOrphan))
 
-			setDeletionPolicy(temporalv1alpha1.SearchAttributeDeletionPolicyDelete)
+			setDeletionPolicy(temporalv1beta1.SearchAttributeDeletionPolicyDelete)
 
 			By("switching it while the resource is terminating")
 			beginDeletion()
-			setDeletionPolicy(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.SearchAttributeDeletionPolicyOrphan)
 
 			// The immutability rules must not have caught this: it is the way
 			// out of a deletion blocked on a broken dependency.
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.SearchAttributeDeletionPolicyOrphan))
+				To(Equal(temporalv1beta1.SearchAttributeDeletionPolicyOrphan))
 			Expect(stored().GetDeletionTimestamp().IsZero()).To(BeFalse())
 
 			resetTemporalCalls()
@@ -1087,10 +1087,10 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should refuse to change the type", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			attribute := stored()
-			attribute.Spec.Type = temporalv1alpha1.SearchAttributeTypeText
+			attribute.Spec.Type = temporalv1beta1.SearchAttributeTypeText
 
 			err := k8sClient.Update(ctx, attribute)
 			Expect(err).To(HaveOccurred())
@@ -1098,10 +1098,10 @@ var _ = Describe("SearchAttribute Controller", func() {
 		})
 
 		It("should allow everything else to change", func() {
-			createSearchAttribute(temporalv1alpha1.SearchAttributeTypeKeyword)
+			createSearchAttribute(temporalv1beta1.SearchAttributeTypeKeyword)
 
 			attribute := stored()
-			attribute.Spec.DeletionPolicy = temporalv1alpha1.SearchAttributeDeletionPolicyOrphan
+			attribute.Spec.DeletionPolicy = temporalv1beta1.SearchAttributeDeletionPolicyOrphan
 			Expect(k8sClient.Update(ctx, attribute)).To(Succeed())
 		})
 	})
@@ -1135,13 +1135,13 @@ var _ = Describe("SearchAttribute dependencies", func() {
 
 	// dependant builds a SearchAttribute in the test namespace referencing the
 	// given dependencies.
-	dependant := func(name, conn, ns string) *temporalv1alpha1.SearchAttribute {
-		return &temporalv1alpha1.SearchAttribute{
+	dependant := func(name, conn, ns string) *temporalv1beta1.SearchAttribute {
+		return &temporalv1beta1.SearchAttribute{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: saNamespace},
-			Spec: temporalv1alpha1.SearchAttributeSpec{
+			Spec: temporalv1beta1.SearchAttributeSpec{
 				ConnectionRef: corev1.LocalObjectReference{Name: conn},
 				NamespaceRef:  corev1.LocalObjectReference{Name: ns},
-				Type:          temporalv1alpha1.SearchAttributeTypeKeyword,
+				Type:          temporalv1beta1.SearchAttributeTypeKeyword,
 			},
 		}
 	}
@@ -1165,9 +1165,9 @@ var _ = Describe("SearchAttribute dependencies", func() {
 			Entry("an empty Namespace reference", indexSearchAttributeByNamespace,
 				dependant("no-namespace", connectionA, ""), []string(nil)),
 			Entry("a nil SearchAttribute", indexSearchAttributeByConnection,
-				(*temporalv1alpha1.SearchAttribute)(nil), []string(nil)),
+				(*temporalv1beta1.SearchAttribute)(nil), []string(nil)),
 			Entry("an object of another kind", indexSearchAttributeByNamespace,
-				&temporalv1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: connectionA}}, []string(nil)),
+				&temporalv1beta1.Connection{ObjectMeta: metav1.ObjectMeta{Name: connectionA}}, []string(nil)),
 		)
 	})
 
@@ -1183,9 +1183,9 @@ var _ = Describe("SearchAttribute dependencies", func() {
 			mapper = &SearchAttributeReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.SearchAttribute{},
+					WithIndex(&temporalv1beta1.SearchAttribute{},
 						searchAttributeConnectionRefIndex, indexSearchAttributeByConnection).
-					WithIndex(&temporalv1alpha1.SearchAttribute{},
+					WithIndex(&temporalv1beta1.SearchAttribute{},
 						searchAttributeNamespaceRefIndex, indexSearchAttributeByNamespace).
 					WithObjects(
 						dependant("attr-one", connectionA, namespaceA),
@@ -1198,7 +1198,7 @@ var _ = Describe("SearchAttribute dependencies", func() {
 		})
 
 		It("should map a Connection to its dependants beside it", func() {
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionA, Namespace: saNamespace},
 			}
 
@@ -1211,7 +1211,7 @@ var _ = Describe("SearchAttribute dependencies", func() {
 		})
 
 		It("should map a Namespace to its dependants beside it", func() {
-			ns := &temporalv1alpha1.Namespace{
+			ns := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: namespaceA, Namespace: saNamespace},
 			}
 
@@ -1222,15 +1222,15 @@ var _ = Describe("SearchAttribute dependencies", func() {
 		})
 
 		It("should map the same however the event arose", func() {
-			ready := &temporalv1alpha1.Namespace{
+			ready := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: namespaceA, Namespace: saNamespace},
 			}
 			meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
-				Type:   temporalv1alpha1.ConditionTypeReady,
+				Type:   temporalv1beta1.ConditionTypeReady,
 				Status: metav1.ConditionTrue,
 				Reason: ReasonCreated,
 			})
-			ready.Status.Ownership = temporalv1alpha1.NamespaceOwnershipCreated
+			ready.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 
 			deleted := ready.DeepCopy()
 			deleted.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
@@ -1243,7 +1243,7 @@ var _ = Describe("SearchAttribute dependencies", func() {
 		})
 
 		It("should return nothing when nothing depends on the event", func() {
-			unused := &temporalv1alpha1.Connection{
+			unused := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: "unused", Namespace: saNamespace},
 			}
 
@@ -1255,7 +1255,7 @@ var _ = Describe("SearchAttribute dependencies", func() {
 			failing := &SearchAttributeReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.SearchAttribute{},
+					WithIndex(&temporalv1beta1.SearchAttribute{},
 						searchAttributeConnectionRefIndex, indexSearchAttributeByConnection).
 					WithInterceptorFuncs(interceptor.Funcs{
 						List: func(
@@ -1268,7 +1268,7 @@ var _ = Describe("SearchAttribute dependencies", func() {
 					Build(),
 			}
 
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionA, Namespace: saNamespace},
 			}
 

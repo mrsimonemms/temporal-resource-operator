@@ -36,7 +36,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -108,7 +108,7 @@ type NexusEndpointReconciler struct {
 func (r *NexusEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	endpoint := &temporalv1alpha1.NexusEndpoint{}
+	endpoint := &temporalv1beta1.NexusEndpoint{}
 	if err := r.Get(ctx, req.NamespacedName, endpoint); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted, or the cache is behind. Either way there is nothing to
@@ -139,7 +139,7 @@ func (r *NexusEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	reason, message, reconcileErr := r.reconcileEndpoint(ctx, endpoint)
 
 	condition := &metav1.Condition{
-		Type:               temporalv1alpha1.ConditionTypeReady,
+		Type:               temporalv1beta1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            message,
@@ -171,7 +171,7 @@ func (r *NexusEndpointReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // reconcileEndpoint brings the Temporal Nexus endpoint into line with the spec.
 func (r *NexusEndpointReconciler) reconcileEndpoint(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 ) (reason, message string, err error) {
 	conn, reason, err := r.readyEndpointDependencies(ctx, endpoint)
 	if err != nil {
@@ -208,7 +208,7 @@ func (r *NexusEndpointReconciler) reconcileEndpoint(
 // the operator created, and stays adopted while doing so.
 func (r *NexusEndpointReconciler) reconcileExistingEndpoint(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 	temporalClient TemporalNexusEndpointClient,
 	actual *temporal.NexusEndpoint,
 ) (reason, message string, err error) {
@@ -265,14 +265,14 @@ func (r *NexusEndpointReconciler) reconcileExistingEndpoint(
 // make it the operator's to delete.
 func (r *NexusEndpointReconciler) createEndpoint(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 	temporalClient TemporalNexusEndpointClient,
 ) (reason, message string, err error) {
 	establishing := !endpoint.Status.Ownership.IsEstablished()
 
 	if establishing {
 		if err := r.persistEndpointOwnership(
-			ctx, endpoint, temporalv1alpha1.NexusEndpointOwnershipCreating,
+			ctx, endpoint, temporalv1beta1.NexusEndpointOwnershipCreating,
 		); err != nil {
 			return ReasonCreateFailed, "", fmt.Errorf("recording intent to create nexus endpoint: %w", err)
 		}
@@ -300,7 +300,7 @@ func (r *NexusEndpointReconciler) createEndpoint(
 		// Settled in memory; the caller's status write persists it alongside
 		// the Ready condition. Should that write fail, ownership stays at
 		// Creating and the next reconcile resolves it to Created.
-		endpoint.Status.Ownership = temporalv1alpha1.NexusEndpointOwnershipCreated
+		endpoint.Status.Ownership = temporalv1beta1.NexusEndpointOwnershipCreated
 	}
 
 	return ReasonCreated, fmt.Sprintf(
@@ -322,18 +322,18 @@ func (r *NexusEndpointReconciler) createEndpoint(
 // another actor could have taken the name in the intervening moment. Reading it
 // as Created is the deliberate choice, because the alternative would make the
 // marker useless for the failure it exists to survive.
-func establishEndpointOwnership(endpoint *temporalv1alpha1.NexusEndpoint) bool {
+func establishEndpointOwnership(endpoint *temporalv1beta1.NexusEndpoint) bool {
 	if endpoint.Status.Ownership.IsEstablished() {
 		return false
 	}
 
-	if endpoint.Status.Ownership == temporalv1alpha1.NexusEndpointOwnershipCreating {
-		endpoint.Status.Ownership = temporalv1alpha1.NexusEndpointOwnershipCreated
+	if endpoint.Status.Ownership == temporalv1beta1.NexusEndpointOwnershipCreating {
+		endpoint.Status.Ownership = temporalv1beta1.NexusEndpointOwnershipCreated
 
 		return false
 	}
 
-	endpoint.Status.Ownership = temporalv1alpha1.NexusEndpointOwnershipAdopted
+	endpoint.Status.Ownership = temporalv1beta1.NexusEndpointOwnershipAdopted
 
 	return true
 }
@@ -349,12 +349,12 @@ func establishEndpointOwnership(endpoint *temporalv1alpha1.NexusEndpoint) bool {
 //nolint:dupl // mirrors the other finalisers on purpose; see above
 func (r *NexusEndpointReconciler) finaliseEndpoint(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
-	observed *temporalv1alpha1.NexusEndpointStatus,
+	endpoint *temporalv1beta1.NexusEndpoint,
+	observed *temporalv1beta1.NexusEndpointStatus,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	if !controllerutil.ContainsFinalizer(endpoint, temporalv1alpha1.NexusEndpointFinalizer) {
+	if !controllerutil.ContainsFinalizer(endpoint, temporalv1beta1.NexusEndpointFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
@@ -365,7 +365,7 @@ func (r *NexusEndpointReconciler) finaliseEndpoint(
 	// Connection. It is the way out of a deletion that would otherwise be
 	// blocked, so it must not depend on any of the machinery that could be what
 	// is broken.
-	if policy := endpoint.Spec.DeletionPolicyValue(); policy == temporalv1alpha1.NexusEndpointDeletionPolicyOrphan {
+	if policy := endpoint.Spec.DeletionPolicyValue(); policy == temporalv1beta1.NexusEndpointDeletionPolicyOrphan {
 		log.Info("Leaving Temporal Nexus endpoint in place",
 			"endpoint", name, "deletionPolicy", string(policy))
 
@@ -385,7 +385,7 @@ func (r *NexusEndpointReconciler) finaliseEndpoint(
 		log.Error(err, "Failed to delete Temporal Nexus endpoint", "endpoint", name, "reason", reason)
 
 		condition := &metav1.Condition{
-			Type:               temporalv1alpha1.ConditionTypeReady,
+			Type:               temporalv1beta1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            err.Error(),
@@ -414,7 +414,7 @@ func (r *NexusEndpointReconciler) finaliseEndpoint(
 // search attributes have to allow for cannot arise.
 func (r *NexusEndpointReconciler) deleteEndpoint(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
@@ -470,8 +470,8 @@ func (r *NexusEndpointReconciler) deleteEndpoint(
 //nolint:dupl // parallel with the sibling controllers on purpose; see dependency.go
 func (r *NexusEndpointReconciler) readyEndpointDependencies(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
-) (*temporalv1alpha1.Connection, string, error) {
+	endpoint *temporalv1beta1.NexusEndpoint,
+) (*temporalv1beta1.Connection, string, error) {
 	conn, reason, err := getConnection(ctx, r.Client, endpoint.Spec.ConnectionRef.Name, endpoint.Namespace)
 	if err != nil {
 		return nil, reason, err
@@ -482,7 +482,7 @@ func (r *NexusEndpointReconciler) readyEndpointDependencies(
 		return nil, reason, err
 	}
 
-	namespace := &temporalv1alpha1.Namespace{}
+	namespace := &temporalv1beta1.Namespace{}
 	key := types.NamespacedName{Namespace: endpoint.Namespace, Name: endpoint.Spec.NamespaceRef.Name}
 
 	if err := r.Get(ctx, key, namespace); err != nil {
@@ -505,7 +505,7 @@ func (r *NexusEndpointReconciler) readyEndpointDependencies(
 // describes.
 func (r *NexusEndpointReconciler) endpointClient(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 ) (TemporalNexusEndpointClient, string, error) {
 	opts, err := r.Resolver.ResolveConnection(ctx, conn)
 	if err != nil {
@@ -532,11 +532,11 @@ func (r *NexusEndpointReconciler) endpointClient(
 // ensureEndpointFinalizer adds the finalizer if it is missing.
 func (r *NexusEndpointReconciler) ensureEndpointFinalizer(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 ) error {
 	patch := endpointFinalizerPatch(endpoint)
 
-	if !controllerutil.AddFinalizer(endpoint, temporalv1alpha1.NexusEndpointFinalizer) {
+	if !controllerutil.AddFinalizer(endpoint, temporalv1beta1.NexusEndpointFinalizer) {
 		return nil
 	}
 
@@ -547,11 +547,11 @@ func (r *NexusEndpointReconciler) ensureEndpointFinalizer(
 // the resource.
 func (r *NexusEndpointReconciler) removeEndpointFinalizer(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
+	endpoint *temporalv1beta1.NexusEndpoint,
 ) error {
 	patch := endpointFinalizerPatch(endpoint)
 
-	if !controllerutil.RemoveFinalizer(endpoint, temporalv1alpha1.NexusEndpointFinalizer) {
+	if !controllerutil.RemoveFinalizer(endpoint, temporalv1beta1.NexusEndpointFinalizer) {
 		return nil
 	}
 
@@ -564,7 +564,7 @@ func (r *NexusEndpointReconciler) removeEndpointFinalizer(
 // A full update would round-trip the spec, and the API server would read the
 // re-marshalled result as a change and bump the generation, waking the
 // controller again for no reason.
-func endpointFinalizerPatch(endpoint *temporalv1alpha1.NexusEndpoint) client.Patch {
+func endpointFinalizerPatch(endpoint *temporalv1beta1.NexusEndpoint) client.Patch {
 	return client.MergeFromWithOptions(endpoint.DeepCopy(), client.MergeFromWithOptimisticLock{})
 }
 
@@ -573,8 +573,8 @@ func endpointFinalizerPatch(endpoint *temporalv1alpha1.NexusEndpoint) client.Pat
 // describes is made.
 func (r *NexusEndpointReconciler) persistEndpointOwnership(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
-	ownership temporalv1alpha1.NexusEndpointOwnership,
+	endpoint *temporalv1beta1.NexusEndpoint,
+	ownership temporalv1beta1.NexusEndpointOwnership,
 ) error {
 	if endpoint.Status.Ownership == ownership {
 		return nil
@@ -589,8 +589,8 @@ func (r *NexusEndpointReconciler) persistEndpointOwnership(
 // already says the same thing.
 func (r *NexusEndpointReconciler) updateEndpointStatus(
 	ctx context.Context,
-	endpoint *temporalv1alpha1.NexusEndpoint,
-	observed *temporalv1alpha1.NexusEndpointStatus,
+	endpoint *temporalv1beta1.NexusEndpoint,
+	observed *temporalv1beta1.NexusEndpointStatus,
 	condition *metav1.Condition,
 ) error {
 	meta.SetStatusCondition(&endpoint.Status.Conditions, *condition)
@@ -606,7 +606,7 @@ func (r *NexusEndpointReconciler) updateEndpointStatus(
 // indexNexusEndpointByConnection extracts the Connection a NexusEndpoint
 // references.
 func indexNexusEndpointByConnection(obj client.Object) []string {
-	return nexusEndpointRef(obj, func(spec temporalv1alpha1.NexusEndpointSpec) string {
+	return nexusEndpointRef(obj, func(spec temporalv1beta1.NexusEndpointSpec) string {
 		return spec.ConnectionRef.Name
 	})
 }
@@ -614,7 +614,7 @@ func indexNexusEndpointByConnection(obj client.Object) []string {
 // indexNexusEndpointByNamespace extracts the Namespace a NexusEndpoint
 // references.
 func indexNexusEndpointByNamespace(obj client.Object) []string {
-	return nexusEndpointRef(obj, func(spec temporalv1alpha1.NexusEndpointSpec) string {
+	return nexusEndpointRef(obj, func(spec temporalv1beta1.NexusEndpointSpec) string {
 		return spec.NamespaceRef.Name
 	})
 }
@@ -624,8 +624,8 @@ func indexNexusEndpointByNamespace(obj client.Object) []string {
 // It is called for every object the cache holds, including ones that are
 // half-built or of the wrong type, so it never assumes anything about what it
 // is handed.
-func nexusEndpointRef(obj client.Object, ref func(temporalv1alpha1.NexusEndpointSpec) string) []string {
-	endpoint, ok := obj.(*temporalv1alpha1.NexusEndpoint)
+func nexusEndpointRef(obj client.Object, ref func(temporalv1beta1.NexusEndpointSpec) string) []string {
+	endpoint, ok := obj.(*temporalv1beta1.NexusEndpoint)
 	if !ok || endpoint == nil {
 		return nil
 	}
@@ -646,7 +646,7 @@ func nexusEndpointRef(obj client.Object, ref func(temporalv1alpha1.NexusEndpoint
 // namespace as well as being filtered by the index.
 func (r *NexusEndpointReconciler) nexusEndpointsForDependency(index string) handler.MapFunc {
 	return func(ctx context.Context, dependency client.Object) []ctrl.Request {
-		return dependants(ctx, r.Client, &temporalv1alpha1.NexusEndpointList{}, index, dependency)
+		return dependants(ctx, r.Client, &temporalv1beta1.NexusEndpointList{}, index, dependency)
 	}
 }
 
@@ -670,7 +670,7 @@ func (r *NexusEndpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// The cache has not started yet, so this only registers the indexer and
 		// returns; there is nothing for a caller's context to cancel.
 		if err := mgr.GetFieldIndexer().IndexField(
-			context.Background(), &temporalv1alpha1.NexusEndpoint{}, field, extract,
+			context.Background(), &temporalv1beta1.NexusEndpoint{}, field, extract,
 		); err != nil {
 			return fmt.Errorf("indexing nexus endpoints by %s: %w", field, err)
 		}
@@ -680,19 +680,19 @@ func (r *NexusEndpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Only the spec matters here, so ignore the status writes this
 		// controller makes itself. Kubernetes bumps the generation when it
 		// stamps a deletion timestamp, so the finalizer flow still runs.
-		For(&temporalv1alpha1.NexusEndpoint{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&temporalv1beta1.NexusEndpoint{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Wake dependants as soon as a dependency changes. Both watches are
 		// deliberately unfiltered: readiness lives in status, so the generation
 		// predicate guarding the primary resource above would discard precisely
 		// the events that matter.
 		Watches(
-			&temporalv1alpha1.Connection{},
+			&temporalv1beta1.Connection{},
 			handler.EnqueueRequestsFromMapFunc(
 				r.nexusEndpointsForDependency(nexusEndpointConnectionRefIndex),
 			),
 		).
 		Watches(
-			&temporalv1alpha1.Namespace{},
+			&temporalv1beta1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(
 				r.nexusEndpointsForDependency(nexusEndpointNamespaceRefIndex),
 			),

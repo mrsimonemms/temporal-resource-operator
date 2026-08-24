@@ -1,4 +1,4 @@
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   labels:

@@ -117,7 +117,7 @@ cluster while this operator manages resources within it.
 
 ## Supported resources
 
-All resources are namespaced and live in the `temporal.simonemms.com/v1alpha1`
+All resources are namespaced and live in the `temporal.simonemms.com/v1beta1`
 API group. Every reference between them is to a resource in the *same*
 Kubernetes namespace.
 
@@ -264,7 +264,7 @@ For a self-hosted Service reachable from inside the cluster with no
 authentication:
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   name: production
@@ -280,7 +280,7 @@ kubectl create secret generic temporal-credentials \
 ```
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   name: production
@@ -307,7 +307,7 @@ production   cluster.temporal.svc.cluster.local:7233    True    Connected   8s
 The resource's `metadata.name` is the Temporal Namespace name.
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   name: payments
@@ -329,7 +329,7 @@ payments   production   168h        Created     True    Created    5s
 ### 3. Add a Search Attribute and a Nexus Endpoint
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   name: customer-id
@@ -341,7 +341,7 @@ spec:
     name: payments
   type: Keyword
 ---
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: NexusEndpoint
 metadata:
   name: payments-nexus
@@ -390,7 +390,7 @@ in Temporal — reconciling it dials the Service and reports whether it is
 healthy.
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Connection
 metadata:
   name: production
@@ -500,7 +500,7 @@ A `Namespace` manages one Temporal Namespace. The resource's `metadata.name`
 Namespace is named once and cannot drift from the resource identifying it.
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: Namespace
 metadata:
   name: payments
@@ -592,7 +592,7 @@ A `SearchAttribute` manages one custom Search Attribute on one Temporal
 Namespace.
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   name: customer-id
@@ -689,7 +689,7 @@ An attribute registered before the operator arrived. It is kept in step, but
 never removed, whatever the policy says:
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: SearchAttribute
 metadata:
   name: order-status
@@ -708,7 +708,7 @@ A `NexusEndpoint` manages one Nexus Endpoint, routing Nexus requests to a
 worker polling a given Namespace and Task Queue.
 
 ```yaml
-apiVersion: temporal.simonemms.com/v1alpha1
+apiVersion: temporal.simonemms.com/v1beta1
 kind: NexusEndpoint
 metadata:
   name: payments-nexus
@@ -1015,7 +1015,8 @@ The operator does not run or manage Temporal in either case.
   to `Orphan`.
 * Secrets referenced by a `Connection` are read but not watched, so credential
   changes are picked up on the next revalidation rather than immediately.
-* The API is `v1alpha1`. Expect breaking changes before it stabilises.
+* The API is `v1beta1`. It is intended for real use, but breaking changes
+  may still occur before `v1`.
 
 ## Contributing
 
@@ -1046,7 +1047,7 @@ pre-commit run -a
 ```
 
 `config/crd/bases`, `config/rbac/role.yaml`, `PROJECT` and `zz_generated.*.go`
-are generated — edit the `+kubebuilder` markers in `api/v1alpha1/*_types.go` and
+are generated — edit the `+kubebuilder` markers in `api/v1beta1/*_types.go` and
 re-run `make manifests generate` instead.
 
 See [AGENTS.md](AGENTS.md) for the full repository conventions.

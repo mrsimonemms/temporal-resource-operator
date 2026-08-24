@@ -32,7 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -101,7 +101,7 @@ type ConnectionReconciler struct {
 func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	conn := &temporalv1alpha1.Connection{}
+	conn := &temporalv1beta1.Connection{}
 	if err := r.Get(ctx, req.NamespacedName, conn); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted, or the cache is behind. Either way there is nothing to
@@ -122,7 +122,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	reason, validationErr := r.validate(ctx, conn)
 
 	condition := &metav1.Condition{
-		Type:               temporalv1alpha1.ConditionTypeReady,
+		Type:               temporalv1beta1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            "Temporal Service is reachable and healthy",
@@ -151,7 +151,7 @@ func (r *ConnectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 // checks it, returning the reason describing which step failed.
 func (r *ConnectionReconciler) validate(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 ) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, validateTimeout)
 	defer cancel()
@@ -191,7 +191,7 @@ func (r *ConnectionReconciler) connect(
 // waking itself up over and over.
 func (r *ConnectionReconciler) updateStatus(
 	ctx context.Context,
-	conn *temporalv1alpha1.Connection,
+	conn *temporalv1beta1.Connection,
 	condition *metav1.Condition,
 ) error {
 	before := conn.Status.DeepCopy()
@@ -218,7 +218,7 @@ func (r *ConnectionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// Only the spec matters here, so ignore the status writes this
 		// controller makes itself.
-		For(&temporalv1alpha1.Connection{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&temporalv1beta1.Connection{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("connection").
 		Complete(r)
 }

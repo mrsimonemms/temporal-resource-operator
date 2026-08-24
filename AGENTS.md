@@ -6,8 +6,8 @@
 
 ```text
 cmd/main.go                    Manager entry (registers controllers/webhooks)
-api/<version>/*_types.go       CRD schemas (+kubebuilder markers)
-api/<version>/zz_generated.*   Auto-generated (DO NOT EDIT)
+api/v1beta1/*_types.go         CRD schemas (+kubebuilder markers)
+api/v1beta1/zz_generated.*     Auto-generated (DO NOT EDIT)
 internal/controller/*          Reconciliation logic
 internal/webhook/*             Validation/defaulting (if present)
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
@@ -16,7 +16,7 @@ config/samples/*               Example CRs (edit these)
 Makefile                       Build/test/deploy commands
 PROJECT                        Kubebuilder metadata Auto-generated (DO NOT EDIT)
 charts/temporal-resource-operator/  Helm chart - the public install method
-charts/.../crds/*              Copies of config/crd/bases (DO NOT hand-edit)
+charts/.../crds/*              Derived from config/crd/bases, gitignored
 ```
 
 **Multi-group layout** (for projects with multiple API groups):
@@ -51,6 +51,17 @@ Check the `PROJECT` file for `multigroup: true`.
 5. Update test suite CRD paths (add one more `..` to relative paths)
 
 ## Critical Rules
+
+### The API Is `v1beta1`, And Only `v1beta1`
+
+The Go package is `api/v1beta1`; the served API is
+`temporal.simonemms.com/v1beta1`. All four CRDs expose exactly one version.
+
+`v1alpha1` existed only while the repository was private and was renamed to
+`v1beta1` before the first public release. It was never publicly served, so
+there is nothing to convert and nothing to support: do not add an `api/v1alpha1`
+package, a second CRD version, a conversion webhook or any migration tooling. A
+future breaking change means a new version, deliberately introduced.
 
 ### Never Edit These (Auto-Generated)
 
@@ -331,7 +342,7 @@ versions with `helm package --version/--app-version`; `Chart.yaml` keeps a
 `0.0.0-dev` version in source and is never rewritten by CI.
 
 **CRDs are copied, not authored.** The source of truth is still the
-`+kubebuilder:rbac`/CRD markers in `api/v1alpha1`, via `config/crd/bases`. After
+`+kubebuilder:rbac`/CRD markers in `api/v1beta1`, via `config/crd/bases`. After
 any change to `*_types.go`:
 
 ```bash

@@ -38,7 +38,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 )
 
@@ -60,7 +60,7 @@ var _ = BeforeSuite(func() {
 func newScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-	Expect(temporalv1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(temporalv1beta1.AddToScheme(scheme)).To(Succeed())
 
 	return scheme
 }
@@ -77,8 +77,8 @@ func newResolver(objects ...ctrlclient.Object) *connection.Resolver {
 }
 
 // newConnection returns a Connection in the test namespace with the given spec.
-func newConnection(name string, spec temporalv1alpha1.ConnectionSpec) *temporalv1alpha1.Connection {
-	return &temporalv1alpha1.Connection{
+func newConnection(name string, spec temporalv1beta1.ConnectionSpec) *temporalv1beta1.Connection {
+	return &temporalv1beta1.Connection{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 		Spec:       spec,
 	}
@@ -127,7 +127,7 @@ var _ = Describe("Resolver", func() {
 
 	Context("with no credentials", func() {
 		It("should resolve an unauthenticated connection", func() {
-			conn := newConnection("local", temporalv1alpha1.ConnectionSpec{Address: testAddress})
+			conn := newConnection("local", temporalv1beta1.ConnectionSpec{Address: testAddress})
 
 			opts, err := newResolver().ResolveConnection(ctx, conn)
 			Expect(err).NotTo(HaveOccurred())
@@ -138,9 +138,9 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should not panic when the optional fields are absent", func() {
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: "bare", Namespace: testNamespace},
-				Spec:       temporalv1alpha1.ConnectionSpec{Address: testAddress},
+				Spec:       temporalv1beta1.ConnectionSpec{Address: testAddress},
 			}
 			Expect(conn.Spec.Credentials).To(BeNil())
 			Expect(conn.Spec.CredentialsSecretRef).To(BeNil())
@@ -153,9 +153,9 @@ var _ = Describe("Resolver", func() {
 
 	Context("with plaintext credentials", func() {
 		It("should resolve an API key", func() {
-			conn := newConnection("api-key", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("api-key", temporalv1beta1.ConnectionSpec{
 				Address:     testAddress,
-				Credentials: &temporalv1alpha1.Credentials{APIKey: "my-api-key"},
+				Credentials: &temporalv1beta1.Credentials{APIKey: "my-api-key"},
 			})
 
 			opts, err := newResolver().ResolveConnection(ctx, conn)
@@ -169,9 +169,9 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should resolve an mTLS certificate and key", func() {
-			conn := newConnection("mtls", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("mtls", temporalv1beta1.ConnectionSpec{
 				Address: testAddress,
-				Credentials: &temporalv1alpha1.Credentials{
+				Credentials: &temporalv1beta1.Credentials{
 					ClientCert: clientCertPEM,
 					ClientKey:  clientKeyPEM,
 				},
@@ -186,9 +186,9 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should reject a certificate without its key", func() {
-			conn := newConnection("half-mtls", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("half-mtls", temporalv1beta1.ConnectionSpec{
 				Address:     testAddress,
-				Credentials: &temporalv1alpha1.Credentials{ClientCert: clientCertPEM},
+				Credentials: &temporalv1beta1.Credentials{ClientCert: clientCertPEM},
 			})
 
 			_, err := newResolver().ResolveConnection(ctx, conn)
@@ -196,9 +196,9 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should reject an unparseable certificate", func() {
-			conn := newConnection("bad-mtls", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("bad-mtls", temporalv1beta1.ConnectionSpec{
 				Address: testAddress,
-				Credentials: &temporalv1alpha1.Credentials{
+				Credentials: &temporalv1beta1.Credentials{
 					ClientCert: "not a certificate",
 					ClientKey:  clientKeyPEM,
 				},
@@ -210,10 +210,10 @@ var _ = Describe("Resolver", func() {
 	})
 
 	Context("with Secret-backed credentials", func() {
-		var conn *temporalv1alpha1.Connection
+		var conn *temporalv1beta1.Connection
 
 		BeforeEach(func() {
-			conn = newConnection("secret", temporalv1alpha1.ConnectionSpec{
+			conn = newConnection("secret", temporalv1beta1.ConnectionSpec{
 				Address:              testAddress,
 				CredentialsSecretRef: &corev1.LocalObjectReference{Name: testSecret},
 			})
@@ -221,7 +221,7 @@ var _ = Describe("Resolver", func() {
 
 		It("should resolve an API key from the Secret", func() {
 			secret := newCredentialsSecret(map[string][]byte{
-				temporalv1alpha1.SecretKeyAPIKey: []byte("my-api-key"),
+				temporalv1beta1.SecretKeyAPIKey: []byte("my-api-key"),
 			})
 
 			opts, err := newResolver(secret).ResolveConnection(ctx, conn)
@@ -233,8 +233,8 @@ var _ = Describe("Resolver", func() {
 
 		It("should resolve an mTLS certificate and key from the Secret", func() {
 			secret := newCredentialsSecret(map[string][]byte{
-				temporalv1alpha1.SecretKeyClientCert: []byte(clientCertPEM),
-				temporalv1alpha1.SecretKeyClientKey:  []byte(clientKeyPEM),
+				temporalv1beta1.SecretKeyClientCert: []byte(clientCertPEM),
+				temporalv1beta1.SecretKeyClientKey:  []byte(clientKeyPEM),
 			})
 
 			opts, err := newResolver(secret).ResolveConnection(ctx, conn)
@@ -259,7 +259,7 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should reject a Connection that also has plaintext credentials", func() {
-			conn.Spec.Credentials = &temporalv1alpha1.Credentials{APIKey: "my-api-key"}
+			conn.Spec.Credentials = &temporalv1beta1.Credentials{APIKey: "my-api-key"}
 
 			_, err := newResolver().ResolveConnection(ctx, conn)
 			Expect(err).To(MatchError(connection.ErrConflictingCredentials))
@@ -268,7 +268,7 @@ var _ = Describe("Resolver", func() {
 
 	Context("with TLS", func() {
 		It("should enable TLS when requested", func() {
-			conn := newConnection("tls", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("tls", temporalv1beta1.ConnectionSpec{
 				Address: testAddress,
 				TLS:     true,
 			})
@@ -282,7 +282,7 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should set the server name, implying TLS", func() {
-			conn := newConnection("tls-server-name", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("tls-server-name", temporalv1beta1.ConnectionSpec{
 				Address:       testAddress,
 				TLSServerName: "temporal.example.com",
 			})
@@ -297,7 +297,7 @@ var _ = Describe("Resolver", func() {
 
 	Context("when resolving by reference", func() {
 		It("should resolve a Connection in the given namespace", func() {
-			conn := newConnection("by-ref", temporalv1alpha1.ConnectionSpec{
+			conn := newConnection("by-ref", temporalv1beta1.ConnectionSpec{
 				Address: testAddress,
 				TLS:     true,
 			})
@@ -326,7 +326,7 @@ var _ = Describe("Resolver", func() {
 		})
 
 		It("should error when the address is empty", func() {
-			conn := newConnection("no-address", temporalv1alpha1.ConnectionSpec{})
+			conn := newConnection("no-address", temporalv1beta1.ConnectionSpec{})
 
 			_, err := newResolver().ResolveConnection(ctx, conn)
 			Expect(err).To(MatchError(connection.ErrAddressRequired))

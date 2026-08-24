@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	temporalv1alpha1 "github.com/mrsimonemms/temporal-resource-operator/api/v1alpha1"
+	temporalv1beta1 "github.com/mrsimonemms/temporal-resource-operator/api/v1beta1"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/connection"
 	"github.com/mrsimonemms/temporal-resource-operator/internal/temporal"
 )
@@ -211,33 +211,33 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		return reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 	}
 
-	stored := func() *temporalv1alpha1.NexusEndpoint {
-		endpoint := &temporalv1alpha1.NexusEndpoint{}
+	stored := func() *temporalv1beta1.NexusEndpoint {
+		endpoint := &temporalv1beta1.NexusEndpoint{}
 		Expect(k8sClient.Get(ctx, key, endpoint)).To(Succeed())
 
 		return endpoint
 	}
 
 	readyCondition := func() *metav1.Condition {
-		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1alpha1.ConditionTypeReady)
+		return meta.FindStatusCondition(stored().Status.Conditions, temporalv1beta1.ConditionTypeReady)
 	}
 
-	ownership := func() temporalv1alpha1.NexusEndpointOwnership {
+	ownership := func() temporalv1beta1.NexusEndpointOwnership {
 		return stored().Status.Ownership
 	}
 
 	hasFinalizer := func() bool {
-		return controllerutil.ContainsFinalizer(stored(), temporalv1alpha1.NexusEndpointFinalizer)
+		return controllerutil.ContainsFinalizer(stored(), temporalv1beta1.NexusEndpointFinalizer)
 	}
 
 	isGone := func() bool {
-		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1alpha1.NexusEndpoint{}))
+		return apierrors.IsNotFound(k8sClient.Get(ctx, key, &temporalv1beta1.NexusEndpoint{}))
 	}
 
-	createConnection := func(status metav1.ConditionStatus) *temporalv1alpha1.Connection {
-		conn := &temporalv1alpha1.Connection{
+	createConnection := func(status metav1.ConditionStatus) *temporalv1beta1.Connection {
+		conn := &temporalv1beta1.Connection{
 			ObjectMeta: metav1.ObjectMeta{Name: connectionName, Namespace: k8sNamespace},
-			Spec:       temporalv1alpha1.ConnectionSpec{Address: address},
+			Spec:       temporalv1beta1.ConnectionSpec{Address: address},
 		}
 		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
@@ -246,7 +246,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		}
 
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type: temporalv1alpha1.ConditionTypeReady, Status: status,
+			Type: temporalv1beta1.ConditionTypeReady, Status: status,
 			Reason: ReasonConnected, Message: connectionReadyMessage,
 		})
 		Expect(k8sClient.Status().Update(ctx, conn)).To(Succeed())
@@ -254,10 +254,10 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		return conn
 	}
 
-	createTemporalNamespace := func(status metav1.ConditionStatus) *temporalv1alpha1.Namespace {
-		ns := &temporalv1alpha1.Namespace{
+	createTemporalNamespace := func(status metav1.ConditionStatus) *temporalv1beta1.Namespace {
+		ns := &temporalv1beta1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: temporalNamespace, Namespace: k8sNamespace},
-			Spec: temporalv1alpha1.NamespaceSpec{
+			Spec: temporalv1beta1.NamespaceSpec{
 				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 			},
 		}
@@ -268,7 +268,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		}
 
 		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
-			Type: temporalv1alpha1.ConditionTypeReady, Status: status,
+			Type: temporalv1beta1.ConditionTypeReady, Status: status,
 			Reason: ReasonCreated, Message: "Registered Temporal namespace",
 		})
 		Expect(k8sClient.Status().Update(ctx, ns)).To(Succeed())
@@ -276,10 +276,10 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		return ns
 	}
 
-	createEndpoint := func(queue string) *temporalv1alpha1.NexusEndpoint {
-		endpoint := &temporalv1alpha1.NexusEndpoint{
+	createEndpoint := func(queue string) *temporalv1beta1.NexusEndpoint {
+		endpoint := &temporalv1beta1.NexusEndpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: k8sNamespace},
-			Spec: temporalv1alpha1.NexusEndpointSpec{
+			Spec: temporalv1beta1.NexusEndpointSpec{
 				Name:          endpointName,
 				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 				NamespaceRef:  corev1.LocalObjectReference{Name: temporalNamespace},
@@ -291,13 +291,13 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		return endpoint
 	}
 
-	setOwnership := func(value temporalv1alpha1.NexusEndpointOwnership) {
+	setOwnership := func(value temporalv1beta1.NexusEndpointOwnership) {
 		endpoint := stored()
 		endpoint.Status.Ownership = value
 		Expect(k8sClient.Status().Update(ctx, endpoint)).To(Succeed())
 	}
 
-	setDeletionPolicy := func(policy temporalv1alpha1.NexusEndpointDeletionPolicy) {
+	setDeletionPolicy := func(policy temporalv1beta1.NexusEndpointDeletionPolicy) {
 		endpoint := stored()
 		endpoint.Spec.DeletionPolicy = policy
 		Expect(k8sClient.Update(ctx, endpoint)).To(Succeed())
@@ -332,7 +332,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 	}
 
 	deleteConnection := func() {
-		conn := &temporalv1alpha1.Connection{}
+		conn := &temporalv1beta1.Connection{}
 		connKey := types.NamespacedName{Name: connectionName, Namespace: k8sNamespace}
 		Expect(k8sClient.Get(ctx, connKey, conn)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, conn)).To(Succeed())
@@ -365,19 +365,19 @@ var _ = Describe("NexusEndpoint Controller", func() {
 	})
 
 	AfterEach(func() {
-		endpoint := &temporalv1alpha1.NexusEndpoint{}
+		endpoint := &temporalv1beta1.NexusEndpoint{}
 		if err := k8sClient.Get(ctx, key, endpoint); err == nil {
-			if controllerutil.RemoveFinalizer(endpoint, temporalv1alpha1.NexusEndpointFinalizer) {
+			if controllerutil.RemoveFinalizer(endpoint, temporalv1beta1.NexusEndpointFinalizer) {
 				Expect(k8sClient.Update(ctx, endpoint)).To(Succeed())
 			}
 			Expect(ctrlclient.IgnoreNotFound(k8sClient.Delete(ctx, endpoint))).To(Succeed())
 		}
 
 		for _, obj := range []ctrlclient.Object{
-			&temporalv1alpha1.Connection{
+			&temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionName, Namespace: k8sNamespace},
 			},
-			&temporalv1alpha1.Namespace{
+			&temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: temporalNamespace, Namespace: k8sNamespace},
 			},
 		} {
@@ -466,7 +466,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 				"the Kubernetes resource name must never reach Temporal")
 			Expect(temporalClient.closed).To(BeTrue())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 			Expect(stored().Status.EndpointID).NotTo(BeEmpty(), "the server ID is recorded as an observation")
 
 			condition := readyCondition()
@@ -478,7 +478,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 		It("should persist Creating before asking Temporal to create anything", func() {
 			createEndpoint(taskQueue)
 
-			var ownershipAtCreate temporalv1alpha1.NexusEndpointOwnership
+			var ownershipAtCreate temporalv1beta1.NexusEndpointOwnership
 			original := reconciler.Connect
 			reconciler.Connect = func(c context.Context, o *sdkclient.Options) (TemporalNexusEndpointClient, error) {
 				inner, err := original(c, o)
@@ -496,7 +496,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownershipAtCreate).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreating))
+			Expect(ownershipAtCreate).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreating))
 		})
 
 		It("should adopt an existing endpoint whose target already matches", func() {
@@ -508,7 +508,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			Expect(temporalClient.created).To(BeEmpty())
 			Expect(temporalClient.updated).To(BeEmpty(), "a matching target needs no update")
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted))
 			Expect(readyCondition().Reason).To(Equal(ReasonAdopted))
 		})
 
@@ -517,19 +517,19 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 			Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
 			Expect(temporalClient.created).To(HaveLen(1))
 		})
 
 		It("should recover Created from the Creating marker when the status write fails", func() {
 			createEndpoint(taskQueue)
-			setOwnership(temporalv1alpha1.NexusEndpointOwnershipCreating)
+			setOwnership(temporalv1beta1.NexusEndpointOwnershipCreating)
 
 			// The endpoint is there under exactly the requested name, which is
 			// the state an interrupted create leaves behind.
@@ -538,7 +538,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated),
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated),
 				"an interrupted create must not be mistaken for an adoption")
 			Expect(temporalClient.created).To(BeEmpty())
 		})
@@ -579,7 +579,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(err).To(MatchError(temporal.ErrNexusEndpointExists))
 
 			Expect(readyCondition().Reason).To(Equal(ReasonEndpointTaken))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreating),
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreating),
 				"a name taken by something else settles nothing")
 		})
 
@@ -600,7 +600,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 
 			delete(temporalClient.existing, endpointName)
 			resetTemporalCalls()
@@ -610,7 +610,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			Expect(temporalClient.created).To(HaveLen(1), "the endpoint should be put back")
 			Expect(temporalClient.created[0].name).To(Equal(endpointName))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 		})
 
 		It("should recreate an externally removed adopted endpoint and stay Adopted", func() {
@@ -619,7 +619,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted))
 
 			delete(temporalClient.existing, endpointName)
 
@@ -627,7 +627,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(temporalClient.created).To(HaveLen(1))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipAdopted),
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted),
 				"restoring someone else's endpoint does not make it the operator's to delete")
 		})
 	})
@@ -661,7 +661,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(temporalClient.existing[endpointName].ID).To(Equal(created.ID),
 				"the endpoint keeps its identity through an update")
 
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 			Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
 			Expect(readyCondition().Message).To(ContainSubstring(otherTaskQueue))
 		})
@@ -676,7 +676,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			// Adoption means the operator keeps it in step, not that it owns it.
 			Expect(temporalClient.updated).To(HaveLen(1))
 			Expect(temporalClient.existing[endpointName].TaskQueue).To(Equal(taskQueue))
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted))
 			Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
 		})
 
@@ -738,7 +738,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipCreated))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipCreated))
 
 			beginDeletion()
 
@@ -756,7 +756,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ownership()).To(Equal(temporalv1alpha1.NexusEndpointOwnershipAdopted))
+			Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted))
 
 			beginDeletion()
 			resetTemporalCalls()
@@ -771,14 +771,14 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 		DescribeTable(
 			"should release without contacting Temporal under Orphan",
-			func(ownershipValue temporalv1alpha1.NexusEndpointOwnership) {
+			func(ownershipValue temporalv1beta1.NexusEndpointOwnership) {
 				createEndpoint(taskQueue)
 
 				_, err := reconcile()
 				Expect(err).NotTo(HaveOccurred())
 
 				setOwnership(ownershipValue)
-				setDeletionPolicy(temporalv1alpha1.NexusEndpointDeletionPolicyOrphan)
+				setDeletionPolicy(temporalv1beta1.NexusEndpointDeletionPolicyOrphan)
 				beginDeletion()
 				resetTemporalCalls()
 
@@ -789,9 +789,9 @@ var _ = Describe("NexusEndpoint Controller", func() {
 				Expect(temporalClient.existing).To(HaveKey(endpointName))
 				Expect(isGone()).To(BeTrue())
 			},
-			Entry("Created", temporalv1alpha1.NexusEndpointOwnershipCreated),
-			Entry("Creating", temporalv1alpha1.NexusEndpointOwnershipCreating),
-			Entry("Adopted", temporalv1alpha1.NexusEndpointOwnershipAdopted),
+			Entry("Created", temporalv1beta1.NexusEndpointOwnershipCreated),
+			Entry("Creating", temporalv1beta1.NexusEndpointOwnershipCreating),
+			Entry("Adopted", temporalv1beta1.NexusEndpointOwnershipAdopted),
 		)
 
 		It("should release under Orphan even with no Connection at all", func() {
@@ -801,7 +801,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			deleteConnection()
-			setDeletionPolicy(temporalv1alpha1.NexusEndpointDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NexusEndpointDeletionPolicyOrphan)
 			beginDeletion()
 			resetTemporalCalls()
 
@@ -856,7 +856,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			// A Nexus endpoint belongs to the Service, not to a namespace. The
 			// Namespace resource going away says nothing about whether the
 			// endpoint is still registered, and finalisation never asks it.
-			ns := &temporalv1alpha1.Namespace{}
+			ns := &temporalv1beta1.Namespace{}
 			nsKey := types.NamespacedName{Name: temporalNamespace, Namespace: k8sNamespace}
 			Expect(k8sClient.Get(ctx, nsKey, ns)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
@@ -918,7 +918,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			after := stored()
-			Expect(controllerutil.ContainsFinalizer(after, temporalv1alpha1.NexusEndpointFinalizer)).To(BeTrue())
+			Expect(controllerutil.ContainsFinalizer(after, temporalv1beta1.NexusEndpointFinalizer)).To(BeTrue())
 			Expect(after.Generation).To(Equal(int64(1)),
 				"adding the finalizer must not change the spec")
 		})
@@ -926,19 +926,19 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 	Context("validation and defaulting", func() {
 		It("should default the deletion policy to Delete without admission", func() {
-			spec := temporalv1alpha1.NexusEndpointSpec{}
+			spec := temporalv1beta1.NexusEndpointSpec{}
 			Expect(spec.DeletionPolicy).To(BeEmpty())
 			Expect(spec.DeletionPolicyValue()).
-				To(Equal(temporalv1alpha1.NexusEndpointDeletionPolicyDelete))
-			Expect(temporalv1alpha1.DefaultNexusEndpointDeletionPolicy).
-				To(Equal(temporalv1alpha1.NexusEndpointDeletionPolicyDelete))
+				To(Equal(temporalv1beta1.NexusEndpointDeletionPolicyDelete))
+			Expect(temporalv1beta1.DefaultNexusEndpointDeletionPolicy).
+				To(Equal(temporalv1beta1.NexusEndpointDeletionPolicyDelete))
 		})
 
 		It("should default the deletion policy at admission", func() {
 			createEndpoint(taskQueue)
 
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.NexusEndpointDeletionPolicyDelete))
+				To(Equal(temporalv1beta1.NexusEndpointDeletionPolicyDelete))
 		})
 
 		It("should map the Kubernetes resource onto the Temporal endpoint", func() {
@@ -951,8 +951,8 @@ var _ = Describe("NexusEndpoint Controller", func() {
 
 		DescribeTable(
 			"should be rejected by the API server",
-			func(mutate func(*temporalv1alpha1.NexusEndpointSpec), expected string) {
-				spec := temporalv1alpha1.NexusEndpointSpec{
+			func(mutate func(*temporalv1beta1.NexusEndpointSpec), expected string) {
+				spec := temporalv1beta1.NexusEndpointSpec{
 					Name:          endpointName,
 					ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
 					NamespaceRef:  corev1.LocalObjectReference{Name: temporalNamespace},
@@ -960,33 +960,33 @@ var _ = Describe("NexusEndpoint Controller", func() {
 				}
 				mutate(&spec)
 
-				err := k8sClient.Create(ctx, &temporalv1alpha1.NexusEndpoint{
+				err := k8sClient.Create(ctx, &temporalv1beta1.NexusEndpoint{
 					ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: k8sNamespace},
 					Spec:       spec,
 				})
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expected))
 			},
-			Entry("with no Temporal name", func(s *temporalv1alpha1.NexusEndpointSpec) {
+			Entry("with no Temporal name", func(s *temporalv1beta1.NexusEndpointSpec) {
 				s.Name = ""
 			}, "spec.name"),
-			Entry("with no connectionRef name", func(s *temporalv1alpha1.NexusEndpointSpec) {
+			Entry("with no connectionRef name", func(s *temporalv1beta1.NexusEndpointSpec) {
 				s.ConnectionRef.Name = ""
 			}, "connectionRef.name is required"),
-			Entry("with no namespaceRef name", func(s *temporalv1alpha1.NexusEndpointSpec) {
+			Entry("with no namespaceRef name", func(s *temporalv1beta1.NexusEndpointSpec) {
 				s.NamespaceRef.Name = ""
 			}, "namespaceRef.name is required"),
-			Entry("with no task queue", func(s *temporalv1alpha1.NexusEndpointSpec) {
+			Entry("with no task queue", func(s *temporalv1beta1.NexusEndpointSpec) {
 				s.TaskQueue = ""
 			}, "spec.taskQueue"),
-			Entry("with a deletion policy the API does not define", func(s *temporalv1alpha1.NexusEndpointSpec) {
-				s.DeletionPolicy = temporalv1alpha1.NexusEndpointDeletionPolicy("Abandon")
+			Entry("with a deletion policy the API does not define", func(s *temporalv1beta1.NexusEndpointSpec) {
+				s.DeletionPolicy = temporalv1beta1.NexusEndpointDeletionPolicy("Abandon")
 			}, "Unsupported value"),
 		)
 
 		DescribeTable(
 			"should refuse to change what the resource points at",
-			func(mutate func(*temporalv1alpha1.NexusEndpoint), expected string) {
+			func(mutate func(*temporalv1beta1.NexusEndpoint), expected string) {
 				createEndpoint(taskQueue)
 
 				resource := stored()
@@ -996,10 +996,10 @@ var _ = Describe("NexusEndpoint Controller", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(expected))
 			},
-			Entry("the Temporal name", func(e *temporalv1alpha1.NexusEndpoint) {
+			Entry("the Temporal name", func(e *temporalv1beta1.NexusEndpoint) {
 				e.Spec.Name = "SomethingElse"
 			}, "name is immutable"),
-			Entry("the Connection", func(e *temporalv1alpha1.NexusEndpoint) {
+			Entry("the Connection", func(e *temporalv1beta1.NexusEndpoint) {
 				e.Spec.ConnectionRef.Name = "another-connection"
 			}, "connectionRef.name is immutable"),
 		)
@@ -1012,7 +1012,7 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			resource := stored()
 			resource.Spec.TaskQueue = otherTaskQueue
 			resource.Spec.NamespaceRef.Name = "another-namespace"
-			resource.Spec.DeletionPolicy = temporalv1alpha1.NexusEndpointDeletionPolicyOrphan
+			resource.Spec.DeletionPolicy = temporalv1beta1.NexusEndpointDeletionPolicyOrphan
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			Expect(stored().Spec.TaskQueue).To(Equal(otherTaskQueue))
@@ -1028,10 +1028,10 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			beginDeletion()
-			setDeletionPolicy(temporalv1alpha1.NexusEndpointDeletionPolicyOrphan)
+			setDeletionPolicy(temporalv1beta1.NexusEndpointDeletionPolicyOrphan)
 
 			Expect(stored().Spec.DeletionPolicy).
-				To(Equal(temporalv1alpha1.NexusEndpointDeletionPolicyOrphan))
+				To(Equal(temporalv1beta1.NexusEndpointDeletionPolicyOrphan))
 			Expect(stored().GetDeletionTimestamp().IsZero()).To(BeFalse())
 
 			resetTemporalCalls()
@@ -1069,10 +1069,10 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 		namespaceA  = "ns-a"
 	)
 
-	dependant := func(name, conn, ns string) *temporalv1alpha1.NexusEndpoint {
-		return &temporalv1alpha1.NexusEndpoint{
+	dependant := func(name, conn, ns string) *temporalv1beta1.NexusEndpoint {
+		return &temporalv1beta1.NexusEndpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: saNamespace},
-			Spec: temporalv1alpha1.NexusEndpointSpec{
+			Spec: temporalv1beta1.NexusEndpointSpec{
 				Name:          "Endpoint",
 				ConnectionRef: corev1.LocalObjectReference{Name: conn},
 				NamespaceRef:  corev1.LocalObjectReference{Name: ns},
@@ -1100,9 +1100,9 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 			Entry("an empty Namespace reference", indexNexusEndpointByNamespace,
 				dependant("no-namespace", connectionA, ""), []string(nil)),
 			Entry("a nil NexusEndpoint", indexNexusEndpointByConnection,
-				(*temporalv1alpha1.NexusEndpoint)(nil), []string(nil)),
+				(*temporalv1beta1.NexusEndpoint)(nil), []string(nil)),
 			Entry("an object of another kind", indexNexusEndpointByNamespace,
-				&temporalv1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: connectionA}}, []string(nil)),
+				&temporalv1beta1.Connection{ObjectMeta: metav1.ObjectMeta{Name: connectionA}}, []string(nil)),
 		)
 	})
 
@@ -1116,9 +1116,9 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 			mapper = &NexusEndpointReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.NexusEndpoint{},
+					WithIndex(&temporalv1beta1.NexusEndpoint{},
 						nexusEndpointConnectionRefIndex, indexNexusEndpointByConnection).
-					WithIndex(&temporalv1alpha1.NexusEndpoint{},
+					WithIndex(&temporalv1beta1.NexusEndpoint{},
 						nexusEndpointNamespaceRefIndex, indexNexusEndpointByNamespace).
 					WithObjects(
 						dependant("ep-one", connectionA, namespaceA),
@@ -1131,7 +1131,7 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 		})
 
 		It("should map a Connection to its dependants beside it", func() {
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionA, Namespace: saNamespace},
 			}
 
@@ -1143,7 +1143,7 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 		})
 
 		It("should map a Namespace to its dependants beside it", func() {
-			ns := &temporalv1alpha1.Namespace{
+			ns := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: namespaceA, Namespace: saNamespace},
 			}
 
@@ -1154,11 +1154,11 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 		})
 
 		It("should map the same however the event arose", func() {
-			ready := &temporalv1alpha1.Namespace{
+			ready := &temporalv1beta1.Namespace{
 				ObjectMeta: metav1.ObjectMeta{Name: namespaceA, Namespace: saNamespace},
 			}
 			meta.SetStatusCondition(&ready.Status.Conditions, metav1.Condition{
-				Type: temporalv1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue, Reason: ReasonCreated,
+				Type: temporalv1beta1.ConditionTypeReady, Status: metav1.ConditionTrue, Reason: ReasonCreated,
 			})
 
 			deleted := ready.DeepCopy()
@@ -1172,7 +1172,7 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 		})
 
 		It("should return nothing when nothing depends on the event", func() {
-			unused := &temporalv1alpha1.Connection{
+			unused := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: "unreferenced-connection", Namespace: saNamespace},
 			}
 
@@ -1184,7 +1184,7 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 			failing := &NexusEndpointReconciler{
 				Client: fake.NewClientBuilder().
 					WithScheme(k8sClient.Scheme()).
-					WithIndex(&temporalv1alpha1.NexusEndpoint{},
+					WithIndex(&temporalv1beta1.NexusEndpoint{},
 						nexusEndpointConnectionRefIndex, indexNexusEndpointByConnection).
 					WithInterceptorFuncs(interceptor.Funcs{
 						List: func(
@@ -1197,7 +1197,7 @@ var _ = Describe("NexusEndpoint dependencies", func() {
 					Build(),
 			}
 
-			conn := &temporalv1alpha1.Connection{
+			conn := &temporalv1beta1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Name: connectionA, Namespace: saNamespace},
 			}
 
