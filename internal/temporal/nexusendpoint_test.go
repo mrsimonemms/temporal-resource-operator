@@ -29,6 +29,7 @@ import (
 	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/operatorservicemock/v1"
 	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/sdk/converter"
 	sdkmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/grpc"
 )
@@ -154,7 +155,7 @@ var _ = Describe("Nexus endpoint operations", func() {
 					}, nil
 				})
 
-			created, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, namespaceOne, taskQueueOne)
+			created, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, namespaceOne, taskQueueOne, nil)
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(created.ID).To(Equal(endpointID))
@@ -168,7 +169,7 @@ var _ = Describe("Nexus endpoint operations", func() {
 				CreateNexusEndpoint(gomock.Any(), gomock.Any()).
 				Return(nil, serviceerror.NewAlreadyExists("Endpoint with name PaymentsNexus already registered"))
 
-			_, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, namespaceOne, taskQueueOne)
+			_, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, namespaceOne, taskQueueOne, nil)
 			Expect(err).To(MatchError(ErrNexusEndpointExists))
 		})
 
@@ -180,18 +181,18 @@ var _ = Describe("Nexus endpoint operations", func() {
 					"could not verify namespace referenced by target exists",
 				))
 
-			_, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, "ghost", taskQueueOne)
+			_, err := temporalClient.CreateNexusEndpoint(ctx, endpointName, "ghost", taskQueueOne, nil)
 			Expect(errors.Is(err, ErrNexusEndpointExists)).To(BeFalse())
 			Expect(err).To(MatchError(ContainSubstring("creating nexus endpoint PaymentsNexus")))
 		})
 
 		It("should reject an empty name without calling Temporal", func() {
-			_, err := temporalClient.CreateNexusEndpoint(ctx, "", namespaceOne, taskQueueOne)
+			_, err := temporalClient.CreateNexusEndpoint(ctx, "", namespaceOne, taskQueueOne, nil)
 			Expect(err).To(MatchError(ErrNoNexusEndpointName))
 		})
 	})
 
-	Describe("UpdateNexusEndpointTarget", func() {
+	Describe("UpdateNexusEndpoint", func() {
 		It("should send the ID and version it was given", func() {
 			current := newNexusEndpoint(serverEndpoint(4, namespaceOne, taskQueueOne, nil))
 
@@ -214,7 +215,7 @@ var _ = Describe("Nexus endpoint operations", func() {
 					}, nil
 				})
 
-			updated, err := temporalClient.UpdateNexusEndpointTarget(ctx, current, "orders", "orders-nexus")
+			updated, err := temporalClient.UpdateNexusEndpoint(ctx, current, "orders", "orders-nexus", nil)
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(updated.Version).To(Equal(int64(5)))
@@ -241,7 +242,7 @@ var _ = Describe("Nexus endpoint operations", func() {
 					}, nil
 				})
 
-			_, err := temporalClient.UpdateNexusEndpointTarget(ctx, current, "orders", "orders-nexus")
+			_, err := temporalClient.UpdateNexusEndpoint(ctx, current, "orders", "orders-nexus", nil)
 			Expect(err).NotTo(HaveOccurred())
 
 			// The endpoint handed in is left alone, so a failed update does not
@@ -258,15 +259,136 @@ var _ = Describe("Nexus endpoint operations", func() {
 					"nexus endpoint version mismatch. received: 1 expected 7",
 				))
 
-			_, err := temporalClient.UpdateNexusEndpointTarget(ctx, current, "orders", "orders-nexus")
+			_, err := temporalClient.UpdateNexusEndpoint(ctx, current, "orders", "orders-nexus", nil)
 			Expect(err).To(MatchError(ErrNexusEndpointChanged))
 			Expect(err).To(MatchError(ContainSubstring("version mismatch")))
 		})
 
 		It("should reject a nil endpoint without calling Temporal", func() {
-			_, err := temporalClient.UpdateNexusEndpointTarget(ctx, nil, namespaceOne, taskQueueOne)
+			_, err := temporalClient.UpdateNexusEndpoint(ctx, nil, namespaceOne, taskQueueOne, nil)
 			Expect(err).To(MatchError(ErrNoNexusEndpointName))
 		})
+
+		It("should write a description the caller manages", func() {
+			current := newNexusEndpoint(serverEndpoint(1, namespaceOne, taskQueueOne, nil))
+			markdown := "## Payments\n\nHandles **payments**."
+
+			operatorService.EXPECT().
+				UpdateNexusEndpoint(gomock.Any(), gomock.Any()).
+				DoAndReturn(func(
+					_ context.Context,
+					req *operatorservice.UpdateNexusEndpointRequest,
+					_ ...grpc.CallOption,
+				) (*operatorservice.UpdateNexusEndpointResponse, error) {
+					// Round-tripping through the decoder is the check that
+					// matters: it is how Temporal's own tooling reads it back.
+					Expect(decodeDescription(req.GetSpec().GetDescription())).To(Equal(markdown))
+
+					return &operatorservice.UpdateNexusEndpointResponse{
+						Endpoint: serverEndpoint(2, namespaceOne, taskQueueOne,
+							req.GetSpec().GetDescription()),
+					}, nil
+				})
+
+			updated, err := temporalClient.UpdateNexusEndpoint(
+				ctx, current, namespaceOne, taskQueueOne, &markdown,
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updated.Description).To(Equal(markdown))
+		})
+
+		It("should clear a description the caller sets to empty", func() {
+			// The difference between "leave it alone" and "remove it": one is a
+			// nil description, the other an empty string.
+			existing, err := converter.GetDefaultDataConverter().ToPayload("written by hand")
+			Expect(err).NotTo(HaveOccurred())
+
+			current := newNexusEndpoint(serverEndpoint(1, namespaceOne, taskQueueOne, existing))
+			Expect(current.Description).To(Equal("written by hand"))
+
+			empty := ""
+
+			operatorService.EXPECT().
+				UpdateNexusEndpoint(gomock.Any(), gomock.Any()).
+				DoAndReturn(func(
+					_ context.Context,
+					req *operatorservice.UpdateNexusEndpointRequest,
+					_ ...grpc.CallOption,
+				) (*operatorservice.UpdateNexusEndpointResponse, error) {
+					Expect(req.GetSpec().GetDescription()).To(BeNil(),
+						"an empty description should remove it, not store an empty one")
+
+					return &operatorservice.UpdateNexusEndpointResponse{
+						Endpoint: serverEndpoint(2, namespaceOne, taskQueueOne, nil),
+					}, nil
+				})
+
+			updated, err := temporalClient.UpdateNexusEndpoint(
+				ctx, current, namespaceOne, taskQueueOne, &empty,
+			)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updated.Description).To(BeEmpty())
+		})
+	})
+
+	Describe("descriptions", func() {
+		It("should encode a description the way Temporal's own tooling does", func() {
+			// The CLI and UI read the payload with the default data converter,
+			// so a description written here has to be one they understand.
+			markdown := "## Payments Nexus\n\nSee the **runbook**."
+
+			spec := &nexuspb.EndpointSpec{Name: endpointName}
+			Expect(setDescription(spec, &markdown)).To(Succeed())
+
+			Expect(spec.GetDescription()).NotTo(BeNil())
+			Expect(spec.GetDescription().GetMetadata()).To(HaveKeyWithValue(
+				converter.MetadataEncoding, []byte(converter.MetadataEncodingJSON),
+			))
+			Expect(spec.GetDescription().GetData()).To(MatchJSON(`"## Payments Nexus\n\nSee the **runbook**."`))
+		})
+
+		It("should leave the spec alone when the description is not managed", func() {
+			existing, err := converter.GetDefaultDataConverter().ToPayload("not ours")
+			Expect(err).NotTo(HaveOccurred())
+
+			spec := &nexuspb.EndpointSpec{Name: endpointName, Description: existing}
+			Expect(setDescription(spec, nil)).To(Succeed())
+
+			Expect(spec.GetDescription()).To(Equal(existing))
+		})
+
+		It("should read a description back out of a payload", func() {
+			payload, err := converter.GetDefaultDataConverter().ToPayload("# Title\n\nbody")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(decodeDescription(payload)).To(Equal("# Title\n\nbody"))
+			Expect(decodeDescription(nil)).To(BeEmpty())
+		})
+
+		It("should read an unintelligible payload as empty rather than failing", func() {
+			// Nothing Temporal writes looks like this, but a reconcile should
+			// not be brought down by one that does.
+			Expect(decodeDescription(&commonpb.Payload{
+				Metadata: map[string][]byte{converter.MetadataEncoding: []byte("something/else")},
+				Data:     []byte{0x00, 0x01},
+			})).To(BeEmpty())
+		})
+
+		DescribeTable(
+			"DescriptionMatches",
+			func(stored string, wanted *string, expected bool) {
+				endpoint := &NexusEndpoint{Description: stored}
+				Expect(endpoint.DescriptionMatches(wanted)).To(Equal(expected))
+			},
+			Entry("unmanaged, so anything matches", "anything at all", nil, true),
+			Entry("unmanaged and empty", "", nil, true),
+			Entry("the same text", "# Same", new("# Same"), true),
+			Entry("different text", "# One", new("# Two"), false),
+			Entry("wanted empty, has one", "# Something", new(""), false),
+			Entry("wanted empty, has none", "", new(""), true),
+			Entry("wanted one, has none", "", new("# Something"), false),
+			Entry("whitespace is not the same as empty", " ", new(""), false),
+		)
 	})
 
 	Describe("DeleteNexusEndpoint", func() {

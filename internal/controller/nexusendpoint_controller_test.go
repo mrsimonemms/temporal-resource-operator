@@ -52,6 +52,10 @@ type endpointTarget struct {
 type endpointCall struct {
 	name   string
 	target endpointTarget
+
+	// description is what the call asked for: nil where the caller does not
+	// manage it, which is what distinguishes "leave it alone" from "clear it".
+	description *string
 }
 
 // fakeNexusEndpointClient stands in for a Temporal Service. Endpoints are keyed
@@ -116,9 +120,12 @@ func (f *fakeNexusEndpointClient) DescribeNexusEndpoint(
 func (f *fakeNexusEndpointClient) CreateNexusEndpoint(
 	_ context.Context,
 	name, namespace, taskQueue string,
+	description *string,
 ) (*temporal.NexusEndpoint, error) {
 	f.created = append(f.created, endpointCall{
-		name: name, target: endpointTarget{namespace: namespace, taskQueue: taskQueue},
+		name:        name,
+		target:      endpointTarget{namespace: namespace, taskQueue: taskQueue},
+		description: description,
 	})
 
 	if f.createErr != nil {
@@ -129,16 +136,24 @@ func (f *fakeNexusEndpointClient) CreateNexusEndpoint(
 		return nil, fmt.Errorf("%w: %s", temporal.ErrNexusEndpointExists, name)
 	}
 
-	return f.put(name, namespace, taskQueue), nil
+	created := f.put(name, namespace, taskQueue)
+	if description != nil {
+		created.Description = *description
+	}
+
+	return created, nil
 }
 
-func (f *fakeNexusEndpointClient) UpdateNexusEndpointTarget(
+func (f *fakeNexusEndpointClient) UpdateNexusEndpoint(
 	_ context.Context,
 	endpoint *temporal.NexusEndpoint,
 	namespace, taskQueue string,
+	description *string,
 ) (*temporal.NexusEndpoint, error) {
 	f.updated = append(f.updated, endpointCall{
-		name: endpoint.Name, target: endpointTarget{namespace: namespace, taskQueue: taskQueue},
+		name:        endpoint.Name,
+		target:      endpointTarget{namespace: namespace, taskQueue: taskQueue},
+		description: description,
 	})
 
 	if f.updateErr != nil {
@@ -157,6 +172,12 @@ func (f *fakeNexusEndpointClient) UpdateNexusEndpointTarget(
 
 	stored.TargetNamespace = namespace
 	stored.TaskQueue = taskQueue
+
+	// A nil description leaves the stored one alone, as the real client does.
+	if description != nil {
+		stored.Description = *description
+	}
+
 	stored.Version++
 
 	updated := *stored
@@ -306,6 +327,15 @@ var _ = Describe("NexusEndpoint Controller", func() {
 	setTaskQueue := func(queue string) {
 		endpoint := stored()
 		endpoint.Spec.TaskQueue = queue
+		Expect(k8sClient.Update(ctx, endpoint)).To(Succeed())
+	}
+
+	// setDescription puts a description in the spec, or removes the field
+	// altogether when given nil - which is the difference between managing the
+	// description and leaving it to whoever set it.
+	setDescription := func(description *string) {
+		endpoint := stored()
+		endpoint.Spec.Description = description
 		Expect(k8sClient.Update(ctx, endpoint)).To(Succeed())
 	}
 
@@ -694,6 +724,202 @@ var _ = Describe("NexusEndpoint Controller", func() {
 			Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
 		})
 
+		Describe("descriptions", func() {
+			// Community feedback: the Markdown description is what Temporal's UI
+			// shows on the endpoint page, and people managing endpoints
+			// declaratively want it managed declaratively too.
+			const markdown = "## Payments Nexus\n\nHandles the **Payments** service.\n"
+
+			It("should send a description when the endpoint is created", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created).To(Equal([]endpointCall{{
+					name:        endpointName,
+					target:      endpointTarget{namespace: temporalNamespace, taskQueue: taskQueue},
+					description: new(markdown),
+				}}))
+				Expect(temporalClient.existing[endpointName].Description).To(Equal(markdown))
+				Expect(readyCondition().Reason).To(Equal(ReasonCreated))
+			})
+
+			It("should send no description when the field is omitted", func() {
+				createEndpoint(taskQueue)
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(temporalClient.created[0].description).To(BeNil(),
+					"an omitted description is not the operator's to set")
+			})
+
+			It("should put back a description changed behind its back", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				resetTemporalCalls()
+
+				By("someone editing it in the UI")
+				temporalClient.existing[endpointName].Description = "## Something else"
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(Equal([]endpointCall{{
+					name:        endpointName,
+					target:      endpointTarget{namespace: temporalNamespace, taskQueue: taskQueue},
+					description: new(markdown),
+				}}))
+				Expect(temporalClient.existing[endpointName].Description).To(Equal(markdown))
+
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+				Expect(readyCondition().Message).To(ContainSubstring("description"))
+				Expect(readyCondition().Message).NotTo(ContainSubstring("Pointed"),
+					"the endpoint did not move, so the message should not say it did")
+			})
+
+			It("should follow a change to the description in the spec", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				resetTemporalCalls()
+
+				setDescription(new("## Rewritten"))
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.existing[endpointName].Description).To(Equal("## Rewritten"))
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+			})
+
+			It("should not update when the description already matches", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				resetTemporalCalls()
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should leave a description alone while the field is omitted", func() {
+				// The behaviour that was there before this field existed, and
+				// which has to survive it: a description the operator was never
+				// told about is none of its business.
+				createEndpoint(taskQueue)
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				temporalClient.existing[endpointName].Description = "## Set by a human"
+				resetTemporalCalls()
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(BeEmpty(), "an unmanaged description is not drift")
+				Expect(temporalClient.existing[endpointName].Description).To(Equal("## Set by a human"))
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should stop managing a description once the field is removed", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				By("removing the field and editing the description elsewhere")
+				setDescription(nil)
+				temporalClient.existing[endpointName].Description = "## Theirs now"
+				resetTemporalCalls()
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(BeEmpty())
+				Expect(temporalClient.existing[endpointName].Description).To(Equal("## Theirs now"))
+			})
+
+			It("should clear a description set to the empty string", func() {
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(temporalClient.existing[endpointName].Description).To(Equal(markdown))
+
+				resetTemporalCalls()
+				setDescription(new(""))
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(HaveLen(1))
+				Expect(temporalClient.updated[0].description).To(Equal(new("")))
+				Expect(temporalClient.existing[endpointName].Description).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+			})
+
+			It("should correct the target and the description in one update", func() {
+				// Each write bumps the endpoint's version, so two updates in a
+				// row would have the second refused as stale.
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+				resetTemporalCalls()
+
+				setTaskQueue(otherTaskQueue)
+				temporalClient.existing[endpointName].Description = "## Drifted"
+
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(Equal([]endpointCall{{
+					name:        endpointName,
+					target:      endpointTarget{namespace: temporalNamespace, taskQueue: otherTaskQueue},
+					description: new(markdown),
+				}}), "one call should carry both changes")
+
+				stored := temporalClient.existing[endpointName]
+				Expect(stored.TaskQueue).To(Equal(otherTaskQueue))
+				Expect(stored.Description).To(Equal(markdown))
+
+				Expect(readyCondition().Message).To(ContainSubstring("Pointed"))
+				Expect(readyCondition().Message).To(ContainSubstring("description"))
+			})
+
+			It("should manage the description of an adopted endpoint", func() {
+				temporalClient.put(endpointName, temporalNamespace, taskQueue)
+
+				createEndpoint(taskQueue)
+				setDescription(new(markdown))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.existing[endpointName].Description).To(Equal(markdown))
+				Expect(ownership()).To(Equal(temporalv1beta1.NexusEndpointOwnershipAdopted),
+					"managing the description does not make the endpoint the operator's")
+			})
+		})
+
 		It("should report a conflict when the endpoint changed under it", func() {
 			createEndpoint(taskQueue)
 			temporalClient.put(endpointName, temporalNamespace, otherTaskQueue)
@@ -1055,12 +1281,13 @@ type recordingEndpointClient struct {
 func (c *recordingEndpointClient) CreateNexusEndpoint(
 	ctx context.Context,
 	name, namespace, taskQueue string,
+	description *string,
 ) (*temporal.NexusEndpoint, error) {
 	if c.onCreate != nil {
 		c.onCreate()
 	}
 
-	return c.TemporalNexusEndpointClient.CreateNexusEndpoint(ctx, name, namespace, taskQueue)
+	return c.TemporalNexusEndpointClient.CreateNexusEndpoint(ctx, name, namespace, taskQueue, description)
 }
 
 var _ = Describe("NexusEndpoint dependencies", func() {

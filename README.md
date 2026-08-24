@@ -44,6 +44,7 @@ A Kubernetes operator for declaratively managing resources in an existing
     * [Second example: adopting an existing attribute](#second-example-adopting-an-existing-attribute)
   * [NexusEndpoint](#nexusendpoint)
     * [NexusEndpoint fields](#nexusendpoint-fields)
+    * [Descriptions](#descriptions)
     * [Endpoint names are Service-wide](#endpoint-names-are-service-wide)
     * [Retargeting](#retargeting)
     * [Adoption](#adoption)
@@ -746,6 +747,12 @@ spec:
   namespaceRef:
     name: payments
   taskQueue: payments-nexus
+  description: |
+    ## Payments Nexus
+
+    Handles operations for the **Payments** service.
+
+    See the internal runbook for ownership and escalation.
   deletionPolicy: Delete
 ```
 
@@ -760,12 +767,47 @@ As with `SearchAttribute`, `metadata.name` is Kubernetes identity and
 | `spec.connectionRef.name` | string | yes | — | **no** | `Connection` in the same Kubernetes namespace. Must be non-empty. |
 | `spec.namespaceRef.name` | string | yes | — | yes | `Namespace` resource whose Temporal Namespace the endpoint targets. Must be non-empty. |
 | `spec.taskQueue` | string | yes | — | yes | Task Queue a handler worker polls. Must be non-empty. |
+| `spec.description` | string | no | — | yes | Markdown shown on the endpoint's page in Temporal's UI. See [Descriptions](#descriptions). |
 | `spec.deletionPolicy` | enum | no | `Delete` | yes | `Delete` or `Orphan`. See [Deletion policy](#deletion-policy). |
 
 Identity is immutable; the target is not. `spec.name` fixes which endpoint this
 is, and `connectionRef` fixes which Service it lives in — changing either would
 silently point at a different object, so both are rejected. `namespaceRef` and
 `taskQueue` describe where the endpoint routes to, and can be changed freely.
+
+#### Descriptions
+
+`spec.description` is the Markdown Temporal's UI renders on the endpoint's page.
+It is where to say what the endpoint is for and who looks after it, so whoever
+finds it does not have to ask.
+
+```yaml
+spec:
+  description: |
+    ## Payments Nexus
+
+    Handles operations for the **Payments** service.
+
+    See the internal runbook for ownership and escalation.
+```
+
+The field is optional, and whether it is present is what decides who owns the
+description:
+
+* **Omitted** — the operator leaves the description alone. One set by hand, by
+  the Temporal CLI or by another tool survives every update the operator makes.
+  This is what the operator has always done, and is still the default.
+* **Set** — the description becomes managed state like anything else in the
+  spec. The operator writes it on create, and puts it back when it is edited
+  behind the operator's back.
+* **Set to `""`** — the description is removed.
+
+Removing the field again hands the description back: the operator stops writing
+it and leaves whatever is there.
+
+A description change is corrected in the same update as a retarget, because
+Temporal replaces the endpoint's spec wholesale and each write bumps a version
+the next one has to match.
 
 #### Endpoint names are Service-wide
 
@@ -824,9 +866,9 @@ endpoint has actually gone.
 
 * **Worker targets only.** External URL targets are not modelled. Every
   endpoint the operator manages routes to a Namespace and Task Queue.
-* **Description is preserved but not managed.** If you set a description on an
-  endpoint by other means, the operator keeps it when it updates the target,
-  but you cannot declare one here.
+* **Descriptions are managed only when declared.** Leaving `spec.description`
+  out preserves whatever is there, as it always has; setting it hands the
+  description to the operator. See [Descriptions](#descriptions).
 * **One resource per endpoint.** Two resources naming the same Service-wide
   endpoint are unsupported and will fight over it.
 
@@ -1035,8 +1077,6 @@ The operator does not run or manage Temporal in either case.
   same Nexus Endpoint are unsupported and will fight over it.
 * Nexus Endpoints support worker targets only; external URL targets are not
   modelled.
-* A Nexus Endpoint's description is preserved across updates but cannot be
-  declared.
 * Losing the `Connection` blocks `Delete` finalisation for resources that
   depend on it, until the `Connection` is restored or `deletionPolicy` is set
   to `Orphan`.

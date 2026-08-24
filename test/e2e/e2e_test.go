@@ -1223,6 +1223,80 @@ spec:
 			}, 2*time.Minute).Should(Succeed())
 		})
 
+		It("should manage the endpoint description", func() {
+			// The feature this covers came from someone managing Temporal
+			// resources declaratively who wanted the Markdown description -
+			// what Temporal's UI renders on the endpoint page - managed too.
+			const markdown = `## Payments Nexus
+
+Handles operations for the **Payments** service.
+
+See the internal runbook for ownership and escalation.
+`
+
+			readyNamespace()
+
+			By("declaring a description")
+			applyNexusEndpointWithDescription(
+				resourceName, endpointName, temporalNamespace, taskQueue, "", new(markdown),
+			)
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(temporalNexusEndpointDescription(endpointName)).To(Equal(markdown),
+				"the Markdown should reach Temporal exactly as written")
+
+			By("rewriting it")
+			applyNexusEndpointWithDescription(
+				resourceName, endpointName, temporalNamespace, taskQueue, "",
+				new("## Payments Nexus\n\nNow owned by the **Billing** team.\n"),
+			)
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNexusEndpointDescription(endpointName)).
+					To(ContainSubstring("Billing"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Updated"))
+
+			By("clearing it")
+			applyNexusEndpointWithDescription(
+				resourceName, endpointName, temporalNamespace, taskQueue, "", new(""),
+			)
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalNexusEndpointDescription(endpointName)).To(BeEmpty())
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should leave a description it was not given alone", func() {
+			// The behaviour that predates the field: a description the operator
+			// was never told about survives the updates it makes.
+			readyNamespace()
+
+			applyNexusEndpointWithDescription(
+				resourceName, endpointName, temporalNamespace, taskQueue, "",
+				new("## Set through the operator\n"),
+			)
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("removing the field and retargeting the endpoint")
+			applyNexusEndpoint(resourceName, endpointName, temporalNamespace, taskQueue+"-moved", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(nexusEndpointReadyReason(resourceName)).To(Equal("Updated"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(temporalNexusEndpointDescription(endpointName)).
+				To(Equal("## Set through the operator\n"),
+					"an unmanaged description should survive a retarget")
+		})
+
 		It("should adopt an existing endpoint and leave it behind", func() {
 			readyNamespace()
 
@@ -1725,6 +1799,16 @@ func temporalSearchAttributeType(temporalNamespace, name string) string {
 // applyNexusEndpoint applies a NexusEndpoint. resourceName is the Kubernetes
 // resource's name and temporalName is what Temporal is asked for.
 func applyNexusEndpoint(resourceName, temporalName, namespaceRef, taskQueue, deletionPolicy string) {
+	applyNexusEndpointWithDescription(resourceName, temporalName, namespaceRef, taskQueue, deletionPolicy, nil)
+}
+
+// applyNexusEndpointWithDescription applies a NexusEndpoint carrying a
+// description, or leaving the field out altogether when given nil - which is
+// the difference between managing the description and leaving it be.
+func applyNexusEndpointWithDescription(
+	resourceName, temporalName, namespaceRef, taskQueue, deletionPolicy string,
+	description *string,
+) {
 	manifest := `apiVersion: temporal.simonemms.com/v1beta1
 kind: NexusEndpoint
 metadata:
@@ -1739,6 +1823,17 @@ spec:
 `
 	if deletionPolicy != "" {
 		manifest += "  deletionPolicy: " + deletionPolicy + "\n"
+	}
+
+	if description != nil {
+		if *description == "" {
+			manifest += `  description: ""` + "\n"
+		} else {
+			manifest += "  description: |\n"
+			for _, line := range strings.Split(strings.TrimSuffix(*description, "\n"), "\n") {
+				manifest += "    " + line + "\n"
+			}
+		}
 	}
 
 	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
@@ -1787,8 +1882,11 @@ func deleteNexusEndpointResource(name string) {
 type temporalNexusEndpoint struct {
 	ID   string `json:"id"`
 	Spec struct {
-		Name   string `json:"name"`
-		Target struct {
+		Name string `json:"name"`
+		// The CLI decodes the description payload itself, so this arrives as
+		// the Markdown string rather than as an encoded payload.
+		Description string `json:"description"`
+		Target      struct {
 			Worker struct {
 				Namespace string `json:"namespace"`
 				TaskQueue string `json:"taskQueue"`
@@ -1809,6 +1907,19 @@ func describeTemporalNexusEndpoint(name string) (temporalNexusEndpoint, bool) {
 	Expect(json.Unmarshal([]byte(output), &described)).To(Succeed(), "Failed to parse the endpoint")
 
 	return described, described.Spec.Name == name
+}
+
+// temporalNexusEndpointDescription reads an endpoint's description back out of
+// Temporal.
+//
+// Reading it through the CLI is the point: Temporal stores the description as a
+// payload, and the CLI decoding it into plain Markdown is what proves the
+// operator encoded it the way Temporal's own tooling expects.
+func temporalNexusEndpointDescription(name string) string {
+	described, found := describeTemporalNexusEndpoint(name)
+	Expect(found).To(BeTrue(), "The Nexus endpoint should exist")
+
+	return described.Spec.Description
 }
 
 // temporalNexusEndpointExists reports whether the Service still knows about an
