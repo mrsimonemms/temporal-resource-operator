@@ -53,6 +53,10 @@ const missingSecretName = "missing-secret"
 // healthy Connection.
 const connectionReadyMessage = "Temporal Service is reachable and healthy"
 
+// serviceDefaultArchivalURI stands in for the URI a Temporal Service supplies
+// when a namespace enables archival without naming one.
+const serviceDefaultArchivalURI = "file:///tmp/temporal-archival"
+
 // namespaceCall records a Temporal namespace call and the retention it carried.
 type namespaceCall struct {
 	name      string
@@ -64,6 +68,16 @@ type createCall struct {
 	name      string
 	retention time.Duration
 	data      map[string]string
+	archival  archivalCall
+}
+
+// archivalCall records the archival configuration a call carried. Both halves
+// are pointers, because "leave this kind alone" is a distinct request from
+// "disable it".
+type archivalCall struct {
+	name       string
+	history    *temporal.ArchivalConfig
+	visibility *temporal.ArchivalConfig
 }
 
 // fakeNamespaceClient stands in for a Temporal Service. Namespaces in existing
@@ -87,8 +101,16 @@ type fakeNamespaceClient struct {
 	described []string
 	created   []createCall
 	updated   []namespaceCall
+	archived  []archivalCall
 	deleted   []string
 	closed    bool
+
+	// archivalErr fails an archival update.
+	archivalErr error
+
+	// ignoreArchival makes archival updates succeed without changing anything,
+	// which is how a Temporal Service not configured for archival answers.
+	ignoreArchival bool
 }
 
 func (f *fakeNamespaceClient) DescribeNamespace(_ context.Context, name string) (*temporal.Namespace, error) {
@@ -110,17 +132,21 @@ func (f *fakeNamespaceClient) DescribeNamespace(_ context.Context, name string) 
 	return nil, namespaceNotFound(name)
 }
 
-func (f *fakeNamespaceClient) CreateNamespace(
-	_ context.Context,
-	name string,
-	retention time.Duration,
-	data map[string]string,
-) error {
+func (f *fakeNamespaceClient) CreateNamespace(_ context.Context, ns *temporal.Namespace) error {
 	if f.onCreate != nil {
-		f.onCreate(name)
+		f.onCreate(ns.Name)
 	}
 
-	f.created = append(f.created, createCall{name: name, retention: retention, data: maps.Clone(data)})
+	f.created = append(f.created, createCall{
+		name:      ns.Name,
+		retention: ns.Retention,
+		data:      maps.Clone(ns.Data),
+		archival: archivalCall{
+			name:       ns.Name,
+			history:    archivalOf(ns.HistoryArchival),
+			visibility: archivalOf(ns.VisibilityArchival),
+		},
+	})
 
 	if f.createErr != nil {
 		return f.createErr
@@ -128,9 +154,89 @@ func (f *fakeNamespaceClient) CreateNamespace(
 
 	// A real Service would now report the namespace, metadata and all, which is
 	// what makes the interrupted-create specs meaningful.
-	f.existing[name] = &temporal.Namespace{Name: name, Retention: retention, Data: maps.Clone(data)}
+	//
+	// Both kinds of archival start Disabled rather than unspecified, whatever
+	// was asked for. That is what a real Service stores: registration resolves
+	// the request against NeverEnabledState(), so a registered namespace always
+	// has a concrete state - confirmed against temporalio/temporal, which
+	// reports ARCHIVAL_STATE_DISABLED on a freshly registered namespace even
+	// when the request asked for enabled.
+	registered := &temporal.Namespace{
+		Name:               ns.Name,
+		Retention:          ns.Retention,
+		Data:               maps.Clone(ns.Data),
+		HistoryArchival:    temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled},
+		VisibilityArchival: temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled},
+	}
+
+	if !f.ignoreArchival {
+		registered.HistoryArchival = applyArchival(registered.HistoryArchival, &ns.HistoryArchival)
+		registered.VisibilityArchival = applyArchival(registered.VisibilityArchival, &ns.VisibilityArchival)
+	}
+
+	f.existing[ns.Name] = registered
 
 	return nil
+}
+
+func (f *fakeNamespaceClient) UpdateNamespaceArchival(
+	_ context.Context,
+	name string,
+	history *temporal.ArchivalConfig,
+	visibility *temporal.ArchivalConfig,
+) error {
+	f.archived = append(f.archived, archivalCall{name: name, history: history, visibility: visibility})
+
+	if f.archivalErr != nil {
+		return f.archivalErr
+	}
+
+	// A Service with no archival configuration answers successfully and applies
+	// nothing, which is the whole reason the operator reads the setting back.
+	if f.ignoreArchival {
+		return nil
+	}
+
+	if ns, ok := f.existing[name]; ok {
+		ns.HistoryArchival = applyArchival(ns.HistoryArchival, history)
+		ns.VisibilityArchival = applyArchival(ns.VisibilityArchival, visibility)
+	}
+
+	return nil
+}
+
+// archivalOf returns the config as a pointer, or nil when nothing was asked
+// for, so that a recorded call reads the same whichever call made it.
+func archivalOf(cfg temporal.ArchivalConfig) *temporal.ArchivalConfig {
+	if cfg == (temporal.ArchivalConfig{}) {
+		return nil
+	}
+
+	return &cfg
+}
+
+// applyArchival is Temporal's archival state machine, reduced to the parts the
+// operator can reach: an unspecified request changes nothing, a URI is set only
+// while the namespace has none, and enabling without a URI takes the Service's
+// default.
+func applyArchival(actual temporal.ArchivalConfig, request *temporal.ArchivalConfig) temporal.ArchivalConfig {
+	if request == nil || request.State == temporal.ArchivalStateUnspecified {
+		return actual
+	}
+
+	next := temporal.ArchivalConfig{State: request.State, URI: actual.URI}
+
+	switch {
+	case next.URI != "":
+		// Immutable once set. A request naming a different one never gets this
+		// far, because the operator refuses it first.
+	case request.URI != "":
+		next.URI = request.URI
+	case request.State == temporal.ArchivalStateEnabled:
+		next.URI = serviceDefaultArchivalURI
+	}
+
+	return next
 }
 
 func (f *fakeNamespaceClient) UpdateNamespaceRetention(_ context.Context, name string, retention time.Duration) error {
@@ -493,6 +599,56 @@ var _ = Describe("Namespace Controller", func() {
 		return ns
 	}
 
+	// createArchivalNamespace persists a Namespace asking for the given archival
+	// configuration, with the default retention.
+	createArchivalNamespace := func(archival *temporalv1beta1.NamespaceArchival) *temporalv1beta1.Namespace {
+		ns := &temporalv1beta1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: temporalv1beta1.NamespaceSpec{
+				ConnectionRef: corev1.LocalObjectReference{Name: connectionName},
+				Archival:      archival,
+			},
+		}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+
+		return ns
+	}
+
+	// setArchival replaces the archival block on the stored resource, standing
+	// in for a user editing it.
+	setArchival := func(archival *temporalv1beta1.NamespaceArchival) {
+		ns := stored()
+		ns.Spec.Archival = archival
+		Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+	}
+
+	// archivalOn builds an archival block managing history alone, which is the
+	// setting the Temporal UI tells users to configure by hand.
+	archivalOn := func(enabled bool, uri string) *temporalv1beta1.NamespaceArchival {
+		return &temporalv1beta1.NamespaceArchival{
+			History: &temporalv1beta1.ArchivalConfig{Enabled: enabled, URI: uri},
+		}
+	}
+
+	// temporalArchival returns the archival the fake Service holds for the
+	// namespace under test.
+	temporalArchival := func() (history, visibility temporal.ArchivalConfig) {
+		ns, ok := temporalClient.existing[name]
+		Expect(ok).To(BeTrue(), "the Temporal namespace should exist")
+
+		return ns.HistoryArchival, ns.VisibilityArchival
+	}
+
+	// setTemporalArchival seeds the archival the fake Service already holds, so
+	// a spec can start from a namespace that is already configured.
+	setTemporalArchival := func(history, visibility temporal.ArchivalConfig) {
+		ns, ok := temporalClient.existing[name]
+		Expect(ok).To(BeTrue(), "seed the Temporal namespace first")
+
+		ns.HistoryArchival = history
+		ns.VisibilityArchival = visibility
+	}
+
 	// ownerMarker builds the Temporal metadata the operator stamps on a
 	// namespace it registers.
 	ownerMarker := func(uid string) map[string]string {
@@ -550,6 +706,7 @@ var _ = Describe("Namespace Controller", func() {
 		temporalClient.described = nil
 		temporalClient.created = nil
 		temporalClient.updated = nil
+		temporalClient.archived = nil
 		temporalClient.deleted = nil
 	}
 
@@ -559,6 +716,7 @@ var _ = Describe("Namespace Controller", func() {
 		Expect(temporalClient.described).To(BeEmpty(), "Temporal should not have been described")
 		Expect(temporalClient.created).To(BeEmpty())
 		Expect(temporalClient.updated).To(BeEmpty())
+		Expect(temporalClient.archived).To(BeEmpty())
 		Expect(temporalClient.deleted).To(BeEmpty())
 	}
 
@@ -1262,6 +1420,732 @@ var _ = Describe("Namespace Controller", func() {
 			Expect(temporalClient.updated).To(HaveLen(1))
 			Expect(temporalClient.updated[0].retention).To(Equal(temporalv1beta1.DefaultRetention))
 			Expect(temporalv1beta1.DefaultRetention).To(Equal(72 * time.Hour))
+		})
+	})
+
+	Context("when archival is configured", func() {
+		// Everything here is the operator taking over what the Temporal UI
+		// otherwise tells users to do by hand:
+		//
+		//	temporal operator namespace update --history-archival-state enabled <ns>
+		//
+		// Temporal's own rules shape the specs: the two kinds are independent,
+		// a URI is immutable once the Service holds one, and a Service that is
+		// not configured for archival accepts the request and ignores it.
+		BeforeEach(func() {
+			createConnection(metav1.ConditionTrue)
+		})
+
+		Describe("registering a new namespace", func() {
+			It("should register both kinds of archival with the namespace", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					History:    &temporalv1beta1.ArchivalConfig{Enabled: true},
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true},
+				})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Part of the registration request, not an update after it, so
+				// the namespace is never briefly unarchived.
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(temporalClient.created[0].archival.history).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled}))
+				Expect(temporalClient.created[0].archival.visibility).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled}))
+				Expect(temporalClient.archived).To(BeEmpty(), "no separate update should be needed")
+
+				history, visibility := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled))
+				Expect(history.URI).To(Equal(serviceDefaultArchivalURI),
+					"the Service supplies a URI when archival is enabled without one")
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateEnabled))
+
+				condition := readyCondition()
+				Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+				Expect(condition.Reason).To(Equal(ReasonCreated))
+				Expect(condition.Message).To(ContainSubstring("history archival to enabled"))
+				Expect(condition.Message).To(ContainSubstring("visibility archival to enabled"))
+			})
+
+			It("should register with the URI the spec names", func() {
+				createArchivalNamespace(archivalOn(true, "s3://bucket/history"))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created[0].archival.history).To(Equal(&temporal.ArchivalConfig{
+					State: temporal.ArchivalStateEnabled,
+					URI:   "s3://bucket/history",
+				}))
+
+				history, _ := temporalArchival()
+				Expect(history.URI).To(Equal("s3://bucket/history"))
+				Expect(readyCondition().Message).To(ContainSubstring("s3://bucket/history"))
+			})
+
+			It("should say nothing about archival when the spec does not", func() {
+				// The behaviour every Namespace written before archival existed
+				// depends on: the Service applies its own defaults for new
+				// namespaces, and the operator never asks about them again.
+				createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(temporalClient.created[0].archival.history).To(BeNil())
+				Expect(temporalClient.created[0].archival.visibility).To(BeNil())
+				Expect(temporalClient.archived).To(BeEmpty())
+
+				Expect(readyCondition().Reason).To(Equal(ReasonCreated))
+				Expect(readyCondition().Message).NotTo(ContainSubstring("archival"))
+			})
+		})
+
+		Describe("reconciling drift", func() {
+			It("should enable archival on a namespace that has it off", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				// Turned off behind the operator's back, exactly what a resync
+				// exists to notice.
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled, URI: serviceDefaultArchivalURI},
+					temporal.ArchivalConfig{},
+				)
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(HaveLen(1))
+				Expect(temporalClient.archived[0].history).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled}))
+				Expect(temporalClient.archived[0].visibility).To(BeNil(),
+					"the kind the spec does not manage is left alone")
+
+				history, _ := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled))
+
+				condition := readyCondition()
+				Expect(condition.Status).To(Equal(metav1.ConditionTrue))
+				Expect(condition.Reason).To(Equal(ReasonUpdated))
+				Expect(condition.Message).To(ContainSubstring("history archival to enabled"))
+			})
+
+			It("should disable archival the spec has turned off", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setArchival(archivalOn(false, ""))
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				history, _ := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateDisabled))
+				Expect(history.URI).To(Equal(serviceDefaultArchivalURI),
+					"disabling archival does not clear the URI Temporal holds")
+				Expect(readyCondition().Message).To(ContainSubstring("history archival to disabled"))
+			})
+
+			It("should leave a matching namespace alone", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty(), "matching archival needs no update")
+				Expect(temporalClient.described).To(HaveLen(1),
+					"an in-step reconcile should not need a second describe")
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should not read a Service-supplied URI as drift", func() {
+				// The spec asked for archival without naming a destination, so
+				// whatever the Service chose is right by definition. Treating it
+				// as drift would mean an update on every single resync.
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				history, _ := temporalArchival()
+				Expect(history.URI).To(Equal(serviceDefaultArchivalURI))
+
+				resetTemporalCalls()
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should set a URI on a namespace that has none", func() {
+				createArchivalNamespace(archivalOn(false, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				history, _ := temporalArchival()
+				Expect(history.URI).To(BeEmpty(), "disabled archival has no destination yet")
+
+				setArchival(archivalOn(false, "s3://bucket/history"))
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				history, _ = temporalArchival()
+				Expect(history.URI).To(Equal("s3://bucket/history"))
+			})
+
+			It("should contact Temporal about archival not at all when neither kind is managed", func() {
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: serviceDefaultArchivalURI},
+					temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled},
+				)
+				// An empty block manages neither kind, exactly as omitting it
+				// does. Nothing in it says anything about either.
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(temporalClient.described).To(HaveLen(1), "and no read-back either")
+				Expect(readyCondition().Reason).To(Equal(ReasonAdopted))
+			})
+
+			It("should correct the two kinds independently", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					History:    &temporalv1beta1.ArchivalConfig{Enabled: true},
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: false},
+				})
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: serviceDefaultArchivalURI},
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: serviceDefaultArchivalURI},
+				)
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(HaveLen(1))
+				Expect(temporalClient.archived[0].history).To(BeNil(),
+					"history already matches, so nothing is sent for it")
+				Expect(temporalClient.archived[0].visibility).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}))
+
+				history, visibility := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled))
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateDisabled))
+			})
+
+			It("should correct retention and archival in the same reconcile", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				ns := stored()
+				ns.Spec.Retention = &temporalv1beta1.Duration{Duration: 96 * time.Hour}
+				Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+
+				setTemporalArchival(temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}, temporal.ArchivalConfig{})
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(Equal([]namespaceCall{{name: name, retention: 96 * time.Hour}}))
+				Expect(temporalClient.archived).To(HaveLen(1))
+
+				condition := readyCondition()
+				Expect(condition.Reason).To(Equal(ReasonUpdated))
+				Expect(condition.Message).To(ContainSubstring("retention"))
+				Expect(condition.Message).To(ContainSubstring("history archival to enabled"))
+			})
+
+			It("should enable and disable visibility archival", func() {
+				// The visibility half of the same transitions, because the two
+				// are separate fields on Temporal's side and a mapping mistake
+				// would only ever show up on one of them.
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true},
+				})
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				_, visibility := temporalArchival()
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateEnabled))
+				Expect(visibility.URI).To(Equal(serviceDefaultArchivalURI))
+
+				setArchival(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: false},
+				})
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(HaveLen(1))
+				Expect(temporalClient.archived[0].history).To(BeNil())
+				Expect(temporalClient.archived[0].visibility).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}))
+
+				_, visibility = temporalArchival()
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateDisabled))
+				Expect(visibility.URI).To(Equal(serviceDefaultArchivalURI),
+					"disabling does not clear the URI Temporal holds")
+				Expect(readyCondition().Message).To(ContainSubstring("visibility archival to disabled"))
+			})
+
+			It("should register a visibility URI the spec names", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{
+						Enabled: true,
+						URI:     "s3://bucket/visibility",
+					},
+				})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created[0].archival.visibility).To(Equal(&temporal.ArchivalConfig{
+					State: temporal.ArchivalStateEnabled,
+					URI:   "s3://bucket/visibility",
+				}))
+
+				_, visibility := temporalArchival()
+				Expect(visibility.URI).To(Equal("s3://bucket/visibility"))
+			})
+
+			It("should not touch the other kind when one is corrected", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					History:    &temporalv1beta1.ArchivalConfig{Enabled: true},
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true},
+				})
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				before, _ := temporalArchival()
+
+				// Only visibility is turned off in the spec.
+				setArchival(&temporalv1beta1.NamespaceArchival{
+					History:    &temporalv1beta1.ArchivalConfig{Enabled: true},
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: false},
+				})
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				history, visibility := temporalArchival()
+				Expect(history).To(Equal(before), "history should be exactly as it was")
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateDisabled))
+				Expect(readyCondition().Message).NotTo(ContainSubstring("history archival"))
+			})
+
+			It("should report UpdateFailed when Temporal rejects the archival change", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setTemporalArchival(temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}, temporal.ArchivalConfig{})
+				temporalClient.archivalErr = errors.New("archival is not enabled for this cluster")
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).To(MatchError(temporalClient.archivalErr))
+
+				condition := readyCondition()
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal(ReasonUpdateFailed))
+				Expect(condition.Message).To(ContainSubstring("archival is not enabled for this cluster"))
+			})
+		})
+
+		Describe("a URI Temporal will not change", func() {
+			It("should refuse to move an existing destination", func() {
+				createArchivalNamespace(archivalOn(true, "s3://bucket/original"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setArchival(archivalOn(true, "s3://bucket/elsewhere"))
+				resetTemporalCalls()
+
+				result, err := reconcile()
+				Expect(err).NotTo(HaveOccurred(),
+					"a spec Temporal will never accept is reported, not retried with backoff")
+				Expect(result.RequeueAfter).To(Equal(namespaceResyncInterval))
+
+				// Refused locally: sending it would only have the Service refuse
+				// it, and the operator can tell in advance.
+				Expect(temporalClient.archived).To(BeEmpty())
+
+				condition := readyCondition()
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal(ReasonArchivalURIImmutable))
+				Expect(condition.Message).To(ContainSubstring("s3://bucket/original"))
+				Expect(condition.Message).To(ContainSubstring("s3://bucket/elsewhere"))
+
+				history, _ := temporalArchival()
+				Expect(history.URI).To(Equal("s3://bucket/original"), "the destination is untouched")
+			})
+
+			It("should refuse before changing anything else", func() {
+				// The whole archival decision is made before any write, so a
+				// retention change does not go through on a reconcile that is
+				// about to be refused.
+				createArchivalNamespace(archivalOn(true, "s3://bucket/original"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				ns := stored()
+				ns.Spec.Retention = &temporalv1beta1.Duration{Duration: 96 * time.Hour}
+				ns.Spec.Archival = archivalOn(true, "s3://bucket/elsewhere")
+				Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(BeEmpty(), "the retention should not have been written")
+				Expect(readyCondition().Reason).To(Equal(ReasonArchivalURIImmutable))
+			})
+
+			It("should refuse to move an existing visibility destination", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true, URI: "s3://bucket/original"},
+				})
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setArchival(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true, URI: "s3://bucket/elsewhere"},
+				})
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+
+				condition := readyCondition()
+				Expect(condition.Reason).To(Equal(ReasonArchivalURIImmutable))
+				Expect(condition.Message).To(ContainSubstring("visibility"))
+			})
+
+			It("should not keep sending a URI change it knows is doomed", func() {
+				// Temporal refuses the transition every time, so retrying is
+				// pure noise. Several reconciles should leave the Service having
+				// heard nothing at all.
+				createArchivalNamespace(archivalOn(true, "s3://bucket/original"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setArchival(archivalOn(true, "s3://bucket/elsewhere"))
+				resetTemporalCalls()
+
+				for range 5 {
+					result, err := reconcile()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result.RequeueAfter).To(Equal(namespaceResyncInterval),
+						"a doomed spec is rechecked on the resync, not on tight error backoff")
+				}
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(temporalClient.updated).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonArchivalURIImmutable))
+			})
+
+			It("should be content when the desired URI is the one Temporal holds", func() {
+				createArchivalNamespace(archivalOn(true, "s3://bucket/original"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should accept the spec dropping its opinion about the URI", func() {
+				// Removing the uri does not clear it - Temporal will not - it
+				// just stops the operator having an opinion, which resolves the
+				// conflict.
+				createArchivalNamespace(archivalOn(true, "s3://bucket/original"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setArchival(archivalOn(true, "s3://bucket/elsewhere"))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+				Expect(readyCondition().Reason).To(Equal(ReasonArchivalURIImmutable))
+
+				setArchival(archivalOn(true, ""))
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+		})
+
+		Describe("a Service that is not configured for archival", func() {
+			// Temporal accepts the archival part of a register or update and
+			// silently drops it when the Service has no archival configuration -
+			// which includes Temporal Cloud, where Export takes archival's
+			// place. A successful call proves nothing, so the operator reads the
+			// setting back.
+			BeforeEach(func() {
+				temporalClient.ignoreArchival = true
+			})
+
+			It("should report ArchivalUnavailable rather than claiming success", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+
+				result, err := reconcile()
+				Expect(err).NotTo(HaveOccurred(),
+					"nothing the operator can retry its way out of")
+				Expect(result.RequeueAfter).To(Equal(namespaceResyncInterval))
+
+				condition := readyCondition()
+				Expect(condition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).To(Equal(ReasonArchivalUnavailable))
+				Expect(condition.Message).To(ContainSubstring("history archival to enabled"))
+				Expect(condition.Message).To(ContainSubstring("ignored"))
+
+				// The namespace itself was still registered, and is still this
+				// resource's: only the archival setting failed to take.
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipCreated))
+			})
+
+			It("should report it on drift as well as on create", func() {
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
+				createArchivalNamespace(archivalOn(true, ""))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(HaveLen(1), "the update was still attempted")
+				Expect(readyCondition().Reason).To(Equal(ReasonArchivalUnavailable))
+				Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted),
+					"the namespace is still adopted, whatever archival did")
+			})
+
+			It("should keep observedGeneration and the finalizer correct while unconverged", func() {
+				// A non-converged archival setting is still a fully observed
+				// generation: the operator has seen this spec and has an answer
+				// about it. Anything watching observedGeneration to decide
+				// whether the status is current would otherwise wait for ever.
+				createArchivalNamespace(archivalOn(true, ""))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				ns := stored()
+				Expect(ns.Status.ObservedGeneration).To(Equal(ns.Generation))
+				Expect(readyCondition().ObservedGeneration).To(Equal(ns.Generation))
+				Expect(hasFinalizer()).To(BeTrue())
+
+				// And it follows a spec change rather than sticking.
+				setArchival(archivalOn(false, ""))
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				ns = stored()
+				Expect(ns.Status.ObservedGeneration).To(Equal(ns.Generation))
+			})
+
+			It("should not spin on tight error backoff", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+
+				for range 5 {
+					result, err := reconcile()
+					Expect(err).NotTo(HaveOccurred(),
+						"returning an error would requeue on error backoff instead")
+					Expect(result.RequeueAfter).To(Equal(namespaceResyncInterval))
+					Expect(readyCondition().Reason).To(Equal(ReasonArchivalUnavailable))
+				}
+			})
+
+			It("should recover once the Service starts applying it", func() {
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+				Expect(readyCondition().Reason).To(Equal(ReasonArchivalUnavailable))
+
+				temporalClient.ignoreArchival = false
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+
+				history, _ := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled))
+			})
+
+			It("should not check anything back when the spec asks for no archival", func() {
+				createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.described).To(HaveLen(1),
+					"an unmanaged archival setting costs no extra call")
+				Expect(readyCondition().Reason).To(Equal(ReasonCreated))
+			})
+		})
+
+		Describe("adoption", func() {
+			It("should leave a pre-existing namespace's archival alone when the spec is silent", func() {
+				// The safe half of adoption: the operator takes over a namespace
+				// without touching a setting nobody asked it to manage.
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: "s3://theirs/history"},
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: "s3://theirs/visibility"},
+				)
+				createNamespace(nil)
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted))
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonAdopted))
+
+				history, visibility := temporalArchival()
+				Expect(history.URI).To(Equal("s3://theirs/history"))
+				Expect(visibility.URI).To(Equal("s3://theirs/visibility"))
+			})
+
+			It("should report Updated rather than Adopted when adoption also corrects archival", func() {
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
+				createArchivalNamespace(archivalOn(true, ""))
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(ownership()).To(Equal(temporalv1beta1.NamespaceOwnershipAdopted),
+					"configuring archival does not make the namespace the operator's")
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+			})
+
+			It("should not manage archival that a later spec stops declaring", func() {
+				// The same philosophy as a NexusEndpoint description: removing
+				// the field stops the operator having an opinion, it does not
+				// reset the value. Temporal keeps what it has.
+				createArchivalNamespace(archivalOn(true, ""))
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				history, _ := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled))
+
+				setArchival(nil)
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty(),
+					"unmanaging a field must not write to it")
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+
+				history, _ = temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled),
+					"the value the operator was managing is left where it is")
+			})
+
+			It("should not manage the kind a later spec stops declaring", func() {
+				createArchivalNamespace(&temporalv1beta1.NamespaceArchival{
+					History:    &temporalv1beta1.ArchivalConfig{Enabled: true},
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: true},
+				})
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				// History stops being managed; visibility carries on.
+				setArchival(&temporalv1beta1.NamespaceArchival{
+					Visibility: &temporalv1beta1.ArchivalConfig{Enabled: false},
+				})
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(HaveLen(1))
+				Expect(temporalClient.archived[0].history).To(BeNil())
+				Expect(temporalClient.archived[0].visibility).
+					To(Equal(&temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}))
+
+				history, visibility := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateEnabled),
+					"the unmanaged kind keeps whatever it had")
+				Expect(visibility.State).To(Equal(temporal.ArchivalStateDisabled))
+			})
+
+			It("should ignore unmanaged archival changing behind its back", func() {
+				// Temporal holding a value the CR does not declare is not drift.
+				// Reading it as drift would make the operator fight whoever set
+				// it, for ever.
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, nil)
+				createNamespace(nil)
+				Expect(reconcile()).Error().NotTo(HaveOccurred())
+
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: "s3://theirs/history"},
+					temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled, URI: "s3://theirs/visibility"},
+				)
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+			})
+
+			It("should not disturb unmanaged archival while correcting retention", func() {
+				putTemporalNamespace(720*time.Hour, nil)
+				setTemporalArchival(
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: "s3://theirs/history"},
+					temporal.ArchivalConfig{State: temporal.ArchivalStateEnabled, URI: "s3://theirs/visibility"},
+				)
+				createNamespace(&temporalv1beta1.Duration{Duration: 24 * time.Hour})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(Equal([]namespaceCall{{name: name, retention: 24 * time.Hour}}))
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+
+				history, visibility := temporalArchival()
+				Expect(history).To(Equal(temporal.ArchivalConfig{
+					State: temporal.ArchivalStateEnabled, URI: "s3://theirs/history",
+				}))
+				Expect(visibility).To(Equal(temporal.ArchivalConfig{
+					State: temporal.ArchivalStateEnabled, URI: "s3://theirs/visibility",
+				}))
+			})
+
+			It("should not touch archival on a namespace belonging to another resource", func() {
+				putTemporalNamespace(temporalv1beta1.DefaultRetention, ownerMarker("some-other-uid"))
+				setTemporalArchival(temporal.ArchivalConfig{State: temporal.ArchivalStateDisabled}, temporal.ArchivalConfig{})
+				createArchivalNamespace(archivalOn(true, ""))
+
+				_, err := reconcile()
+				Expect(err).To(HaveOccurred())
+
+				Expect(temporalClient.archived).To(BeEmpty())
+				Expect(readyCondition().Reason).To(Equal(ReasonOwnershipConflict))
+
+				history, _ := temporalArchival()
+				Expect(history.State).To(Equal(temporal.ArchivalStateDisabled))
+			})
 		})
 	})
 

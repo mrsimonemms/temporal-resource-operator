@@ -213,3 +213,88 @@ var _ = Describe("Namespace retention", func() {
 		})
 	})
 })
+
+var _ = Describe("Namespace archival", func() {
+	// Both levels of the block are optional, and "not managed" has to survive
+	// each of them being absent. Everything the controller does about Archival
+	// hangs off this distinction: nil means leave the Temporal namespace's
+	// setting alone, whoever set it.
+	Describe("HistoryArchival and VisibilityArchival", func() {
+		It("should report nothing managed when archival is omitted", func() {
+			spec := NamespaceSpec{}
+
+			Expect(spec.HistoryArchival()).To(BeNil())
+			Expect(spec.VisibilityArchival()).To(BeNil())
+		})
+
+		It("should report nothing managed when the block is empty", func() {
+			spec := NamespaceSpec{Archival: &NamespaceArchival{}}
+
+			Expect(spec.HistoryArchival()).To(BeNil())
+			Expect(spec.VisibilityArchival()).To(BeNil())
+		})
+
+		It("should keep the two kinds independent", func() {
+			spec := NamespaceSpec{Archival: &NamespaceArchival{
+				History: &ArchivalConfig{Enabled: true},
+			}}
+
+			Expect(spec.HistoryArchival()).To(Equal(&ArchivalConfig{Enabled: true}))
+			Expect(spec.VisibilityArchival()).To(BeNil(),
+				"configuring one kind says nothing about the other")
+
+			spec = NamespaceSpec{Archival: &NamespaceArchival{
+				Visibility: &ArchivalConfig{Enabled: true},
+			}}
+
+			Expect(spec.HistoryArchival()).To(BeNil())
+			Expect(spec.VisibilityArchival()).To(Equal(&ArchivalConfig{Enabled: true}))
+		})
+
+		It("should tell a disabled kind apart from an unmanaged one", func() {
+			spec := NamespaceSpec{Archival: &NamespaceArchival{
+				History: &ArchivalConfig{Enabled: false},
+			}}
+
+			Expect(spec.HistoryArchival()).NotTo(BeNil(),
+				"asking for archival off is a request, not an absence")
+			Expect(spec.HistoryArchival().Enabled).To(BeFalse())
+		})
+
+		It("should carry the URI through", func() {
+			spec := NamespaceSpec{Archival: &NamespaceArchival{
+				History:    &ArchivalConfig{Enabled: true, URI: "s3://bucket/history"},
+				Visibility: &ArchivalConfig{Enabled: true, URI: "s3://bucket/visibility"},
+			}}
+
+			Expect(spec.HistoryArchival().URI).To(Equal("s3://bucket/history"))
+			Expect(spec.VisibilityArchival().URI).To(Equal("s3://bucket/visibility"))
+		})
+	})
+
+	Describe("decoding", func() {
+		It("should decode the nested shape", func() {
+			var spec NamespaceSpec
+
+			data := []byte(`{"connectionRef":{"name":"production"},"retention":"7d",` +
+				`"archival":{"history":{"enabled":true},"visibility":{"enabled":false}}}`)
+			Expect(json.Unmarshal(data, &spec)).To(Succeed())
+
+			Expect(spec.HistoryArchival()).To(Equal(&ArchivalConfig{Enabled: true}))
+			Expect(spec.VisibilityArchival()).To(Equal(&ArchivalConfig{Enabled: false}))
+		})
+
+		It("should leave archival unset when the field is absent", func() {
+			// A Namespace stored before archival existed decodes with nothing
+			// managed, which is what keeps its behaviour unchanged.
+			var spec NamespaceSpec
+
+			data := []byte(`{"connectionRef":{"name":"production"},"retention":"7d"}`)
+			Expect(json.Unmarshal(data, &spec)).To(Succeed())
+
+			Expect(spec.Archival).To(BeNil())
+			Expect(spec.HistoryArchival()).To(BeNil())
+			Expect(spec.VisibilityArchival()).To(BeNil())
+		})
+	})
+})

@@ -113,6 +113,58 @@ const (
 // in memory behaves the same as one that has been through admission.
 const DefaultDeletionPolicy = NamespaceDeletionPolicyDelete
 
+// NamespaceArchival configures Temporal's Archival for a namespace, replacing
+// the imperative "temporal operator namespace update --history-archival-state"
+// the Temporal UI otherwise asks for.
+//
+// The two kinds are configured independently, and each is managed only when it
+// is present. An omitted block is not an instruction to disable anything: that
+// side of the namespace's archival is left exactly as it is, whoever set it.
+type NamespaceArchival struct {
+	// history configures Archival of closed workflows' event histories.
+	//
+	// Omit it to leave the namespace's history Archival alone.
+	// +optional
+	History *ArchivalConfig `json:"history,omitempty"`
+
+	// visibility configures Archival of closed workflows' visibility records.
+	//
+	// Omit it to leave the namespace's visibility Archival alone.
+	// +optional
+	Visibility *ArchivalConfig `json:"visibility,omitempty"`
+}
+
+// ArchivalConfig is one kind of Archival on one Temporal namespace.
+type ArchivalConfig struct {
+	// enabled turns this kind of Archival on or off for the namespace.
+	//
+	// Archival is configured at the Temporal Service level and switched on per
+	// namespace, so the Service has to be configured for Archival before a
+	// namespace can enable it. A Service that is not - which includes Temporal
+	// Cloud, where Export takes Archival's place - ignores the request rather
+	// than refusing it, so the operator checks that the setting took and
+	// reports ArchivalUnavailable when it did not.
+	// +required
+	Enabled bool `json:"enabled"`
+
+	// uri names the Archival destination, such as
+	// "s3://my-bucket/temporal-archival" or "file:///tmp/temporal-archival".
+	//
+	// Leave it out to take the Service's configured default, which is the usual
+	// case: the Service supplies a URI when a namespace enables Archival
+	// without naming one.
+	//
+	// **A namespace's Archival URI cannot be changed once Temporal has one.**
+	// That is Temporal's rule, not the operator's, and it holds whether the URI
+	// came from this field or from the Service's default. Asking for a
+	// different one is reported as ArchivalURIImmutable rather than retried.
+	// Removing the field does not clear the URI either; it only stops the
+	// operator having an opinion about it.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	URI string `json:"uri,omitempty"`
+}
+
 // NamespaceSpec defines the desired state of Namespace
 type NamespaceSpec struct {
 	// connectionRef references the Connection, in the same Kubernetes
@@ -165,6 +217,38 @@ type NamespaceSpec struct {
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy NamespaceDeletionPolicy `json:"deletionPolicy,omitempty"`
+
+	// archival configures Temporal's Archival for this namespace.
+	//
+	// Omit it, or omit either kind within it, to leave that Archival setting
+	// alone. A Namespace written before this field existed therefore keeps
+	// behaving exactly as it did.
+	// +optional
+	Archival *NamespaceArchival `json:"archival,omitempty"`
+}
+
+// HistoryArchival returns the requested history Archival configuration, or nil
+// when the spec does not manage it.
+//
+// Both levels of the block are optional, so this is the one place that
+// distinction is unpicked; callers get "managed, like this" or "not managed"
+// and nothing in between.
+func (s NamespaceSpec) HistoryArchival() *ArchivalConfig {
+	if s.Archival == nil {
+		return nil
+	}
+
+	return s.Archival.History
+}
+
+// VisibilityArchival returns the requested visibility Archival configuration,
+// or nil when the spec does not manage it.
+func (s NamespaceSpec) VisibilityArchival() *ArchivalConfig {
+	if s.Archival == nil {
+		return nil
+	}
+
+	return s.Archival.Visibility
 }
 
 // RetentionDuration returns the retention to apply.

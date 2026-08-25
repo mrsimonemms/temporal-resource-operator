@@ -404,6 +404,72 @@ spec:
 			removeTemporalNamespace(temporalNamespace)
 		})
 
+		// Archival is configured at the Temporal Service level and switched on
+		// per namespace. The e2e Service is `temporal server start-dev`, which
+		// ships no archival provider, so there is no honest happy path to test
+		// here - and inventing one would test the fake rather than the operator.
+		//
+		// What this Service *does* guarantee is the failure mode that matters
+		// most, and it was confirmed against the same image the e2e deployment
+		// uses (temporalio/temporal, Server 1.31.2) before this spec was
+		// written:
+		//
+		//	$ temporal operator namespace update --history-archival-state enabled probe
+		//	Namespace probe update succeeded.
+		//	$ temporal operator namespace describe probe
+		//	Config.HistoryArchivalState  Disabled
+		//
+		// The Service accepts the request, answers successfully and applies
+		// nothing, because ClusterConfiguredForArchival() is false. Registration
+		// behaves identically. That is exactly what the operator must not read
+		// as convergence, so this spec proves end to end that it does not.
+		//
+		// Should the dev server ever gain a configured archival provider, this
+		// spec fails loudly rather than silently passing - which is the right
+		// way round. Rewrite it as a happy path at that point.
+		It("should refuse to claim archival converged on a Service without it", func() {
+			By("applying a ready Connection")
+			applyConnectionSample()
+
+			By("applying a Namespace asking for history archival")
+			applyNamespaceWithArchival(temporalNamespace, "36h", true)
+
+			By("waiting for the Namespace to report Ready=False with reason ArchivalUnavailable")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceField(temporalNamespace, "{.status.observedGeneration}")).
+					To(Equal(namespaceField(temporalNamespace, "{.metadata.generation}")))
+				g.Expect(namespaceReadyReason(temporalNamespace)).To(Equal("ArchivalUnavailable"))
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("False"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("confirming the Temporal Service really did ignore the request")
+			described := describeTemporalNamespace(temporalNamespace)
+			Expect(described.Config.HistoryArchivalState).To(Equal(archivalStateDisabled),
+				"this spec is only meaningful while the dev server has no archival provider")
+
+			By("confirming everything else about the namespace still converged")
+			Expect(described.Config.WorkflowExecutionRetentionTTL).To(Equal(retentionSeconds(36)))
+			Expect(namespaceOwnership(temporalNamespace)).To(Equal("Created"),
+				"an unapplied archival setting must not disturb ownership")
+
+			uid := namespaceField(temporalNamespace, "{.metadata.uid}")
+			Expect(described.NamespaceInfo.Data).To(HaveKeyWithValue(ownerMarkerKey, uid))
+
+			By("removing the archival block from the Namespace")
+			applyNamespace(temporalNamespace, "36h")
+
+			By("confirming it stops managing archival and goes Ready=True")
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(describeTemporalNamespace(temporalNamespace).Config.HistoryArchivalState).
+				To(Equal(archivalStateDisabled), "unmanaging a field must not write to it")
+
+			By("deleting the Namespace")
+			deleteNamespace(temporalNamespace)
+		})
+
 		It("should own the lifecycle of a namespace it creates", func() {
 			By("applying a ready Connection")
 			applyConnectionSample()
@@ -1503,6 +1569,30 @@ spec:
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Namespace")
 }
 
+// applyNamespaceWithArchival is applyNamespace with an archival block managing
+// history alone. It is written out rather than built from a struct so the
+// manifest reads as the YAML a user would actually apply.
+func applyNamespaceWithArchival(name, retention string, historyEnabled bool) {
+	manifest := fmt.Sprintf(`apiVersion: temporal.simonemms.com/v1beta1
+kind: Namespace
+metadata:
+  name: %s
+spec:
+  connectionRef:
+    name: connection-sample
+  retention: %s
+  archival:
+    history:
+      enabled: %t
+`, name, retention, historyEnabled)
+
+	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Namespace")
+}
+
 // setNamespaceDeletionPolicy patches the deletion policy on a Namespace. It is
 // used on a terminating resource, which the API server permits.
 func setNamespaceDeletionPolicy(name, deletionPolicy string) {
@@ -1981,8 +2071,19 @@ type temporalNamespaceDescription struct {
 	} `json:"namespaceInfo"`
 	Config struct {
 		WorkflowExecutionRetentionTTL string `json:"workflowExecutionRetentionTtl"`
+		HistoryArchivalState          string `json:"historyArchivalState"`
+		HistoryArchivalURI            string `json:"historyArchivalUri"`
+		VisibilityArchivalState       string `json:"visibilityArchivalState"`
+		VisibilityArchivalURI         string `json:"visibilityArchivalUri"`
 	} `json:"config"`
 }
+
+// Archival states as the Temporal CLI renders them in JSON. It prints the
+// protobuf enum name rather than the shorthand the human-readable output shows.
+const (
+	archivalStateDisabled = "ARCHIVAL_STATE_DISABLED"
+	archivalStateEnabled  = "ARCHIVAL_STATE_ENABLED"
+)
 
 // describeTemporalNamespace asks the Temporal Service itself about a namespace.
 func describeTemporalNamespace(name string) temporalNamespaceDescription {
