@@ -31,6 +31,9 @@ A Kubernetes operator for declaratively managing resources in an existing
     * [Connection readiness](#connection-readiness)
   * [Namespace](#namespace)
     * [Namespace fields](#namespace-fields)
+    * [Archival](#archival)
+      * [Omitted means unmanaged](#omitted-means-unmanaged)
+    * [The Archival URI](#the-archival-uri)
     * [Create](#create)
     * [Adopt](#adopt)
     * [Ownership](#ownership)
@@ -510,6 +513,11 @@ spec:
     name: production
   retention: 7d
   deletionPolicy: Delete
+  archival:
+    history:
+      enabled: true
+    visibility:
+      enabled: true
 ```
 
 #### Namespace fields
@@ -520,6 +528,11 @@ spec:
 | `spec.connectionRef.name` | string | yes | — | yes | `Connection` in the same Kubernetes namespace. Must be non-empty. |
 | `spec.retention` | duration | no | `72h` | yes | How long closed workflow histories are kept. Between 1 and 90 days inclusive. |
 | `spec.deletionPolicy` | enum | no | `Delete` | yes | `Delete` or `Orphan`. See [Deletion policy](#deletion-policy). |
+| `spec.archival` | object | no | — | yes | Archival configuration. Omitted, the Namespace's Archival is not managed. See [Archival](#archival). |
+| `spec.archival.history.enabled` | boolean | yes, within `history` | — | yes | Archive closed workflows' event histories. |
+| `spec.archival.history.uri` | string | no | Service default | no, once set | Where histories are archived to. |
+| `spec.archival.visibility.enabled` | boolean | yes, within `visibility` | — | yes | Archive closed workflows' visibility records. |
+| `spec.archival.visibility.uri` | string | no | Service default | no, once set | Where visibility records are archived to. |
 
 `retention` is a duration string. Go's units all work — `72h`, `1h30m`, `90m` —
 and so does a leading whole number of days, where **one day is exactly 24
@@ -557,10 +570,134 @@ the operator will create the Namespace on the new Service and leave the
 original where it is. Change it to correct a reference, not to move a Namespace
 between Services.
 
+#### Archival
+
+Temporal's own UI tells you to configure Archival by hand:
+
+```sh
+temporal operator namespace update --history-archival-state enabled payments
+temporal operator namespace update --visibility-archival-state enabled payments
+```
+
+`spec.archival` is that, declared — here in full, against a self-hosted Service:
+
+```yaml
+apiVersion: temporal.simonemms.com/v1beta1
+kind: Namespace
+metadata:
+  name: payments
+spec:
+  connectionRef:
+    name: production
+  retention: 7d
+  archival:
+    history:
+      enabled: true
+    visibility:
+      enabled: true
+```
+
+**The operator configures Archival; it does not provision the storage.** The
+bucket, the credentials and the archiver plugin are the Temporal Service's
+business, set up in its own configuration before any Namespace can use them.
+This field is the per-Namespace switch, and nothing more.
+
+##### Omitted means unmanaged
+
+The two kinds are independent, and **each is managed only while it is present**:
+
+| Written | Result |
+| --- | --- |
+| `archival` omitted | Neither kind is managed. |
+| `archival.history` omitted | History Archival is left exactly as it is. |
+| `archival.visibility` omitted | Visibility Archival is left exactly as it is. |
+| `archival.history.enabled: true` | History Archival is managed, and on. |
+| `archival.history.enabled: false` | History Archival is managed, and off. |
+
+`enabled` is **required** within a block, precisely so that
+`history: {enabled: false}` and no `history` block at all cannot be confused.
+The first is an instruction to turn Archival off; the second is the operator
+having no opinion. There is no default — a `history` block without `enabled` is
+rejected by the API server.
+
+So a `Namespace` written before this field existed keeps behaving as it always
+did, and this manages history alone while ignoring whatever the Namespace does
+about visibility:
+
+```yaml
+spec:
+  archival:
+    history:
+      enabled: true
+```
+
+Removing a block again **stops managing that kind and preserves its current
+value** — the same way removing a `NexusEndpoint` description does. It is not a
+reset.
+
+Archival is reconciled like retention, not just applied at creation time. A
+Namespace switched off behind the operator's back is switched back on at the
+next resync, and a change to `enabled` is applied in place. What the operator
+never does is write a value the spec has not asked for: Temporal holding a URI
+or a state the CR is silent about is not drift.
+
+**The Temporal Service has to be configured for Archival first.** Archival is
+set up at the Service level — a provider, a bucket, a default URI — and switched
+on per Namespace; a Namespace cannot enable something the Service does not
+offer. What makes this worth spelling out is *how* a Service refuses: it does
+not. A Service with no Archival configuration accepts the request, drops the
+Archival part of it and answers successfully. The operator therefore reads the
+setting back after every change it makes, and reports `Ready=False` with reason
+`ArchivalUnavailable` rather than claiming a success that did not happen. That
+is also what you will see against **Temporal Cloud**, where Archival does not
+exist at all and [Workflow History
+Export](https://docs.temporal.io/cloud/export) takes its place.
+
+#### The Archival URI
+
+`uri` is optional, and usually best left out — the Service supplies its
+configured default when a Namespace enables Archival without one. Set it to send
+a Namespace somewhere other than that default:
+
+```yaml
+spec:
+  archival:
+    history:
+      enabled: true
+      uri: s3://temporal-archive/history
+    visibility:
+      enabled: true
+      uri: s3://temporal-archive/visibility
+```
+
+Which URI schemes work is entirely up to the archivers your Service is
+configured with — `s3://` above is an illustration, not a promise. Temporal
+ships filestore, S3 and GCS archivers, and a Service may have any subset of them
+or a custom one. The operator puts no scheme restriction in the schema for that
+reason, and hands whatever you write to Temporal to validate.
+
+**A Namespace's Archival URI cannot be changed once Temporal holds one.** That
+is Temporal's rule, and it applies whether the URI came from this field or from
+the Service's default. Three consequences:
+
+* Setting a `uri` on a Namespace that has none works, enabled or not.
+* Asking for a *different* `uri` is refused. The operator refuses it locally,
+  reporting `Ready=False` with reason `ArchivalURIImmutable`, rather than
+  sending a request the Service would reject on every retry. The message names
+  both URIs.
+* Removing `uri` does not clear it. It only stops the operator having an opinion
+  — which is how you resolve an `ArchivalURIImmutable` without replacing the
+  Namespace.
+
+Disabling Archival leaves the URI in place too, so re-enabling it later returns
+to the same destination.
+
 #### Create
 
 If the Temporal Namespace named by `metadata.name` does not exist, the operator
-registers it and records `status.ownership: Created`.
+registers it and records `status.ownership: Created`. Archival goes in the
+registration request rather than an update after it, so a Namespace the operator
+creates is never briefly unarchived.
 
 #### Adopt
 
@@ -568,6 +705,11 @@ If a Temporal Namespace of that name already exists and carries no other
 resource's ownership marker, the operator adopts it: it records
 `status.ownership: Adopted` and manages its retention from then on, but will
 never delete it.
+
+Adoption only ever takes over the settings the spec actually asks for. An
+adopted Namespace's Archival is untouched unless `spec.archival` says otherwise,
+and a Namespace belonging to *another* resource is not reconfigured at all — the
+ownership check happens before anything is written.
 
 #### Ownership
 
@@ -1031,6 +1173,8 @@ Failure reasons, and what to do:
 | `DeleteFailed` | An owned Temporal object could not be removed, so the finalizer is being held. See the message — for a `Namespace`, a `NexusEndpoint` still targeting it is a common cause. |
 | `OwnershipConflict` | (`Namespace`) The Temporal Namespace carries another resource's ownership marker. The operator will not touch it. |
 | `OwnershipUnverified` | (`Namespace`) Ownership could not be confirmed from Temporal's metadata, so a destructive operation was refused. |
+| `ArchivalUnavailable` | (`Namespace`) The Service accepted an Archival change and did not apply it, which is what a Service not configured for Archival does — Temporal Cloud included. Configure Archival on the Service, or remove `spec.archival`. |
+| `ArchivalURIImmutable` | (`Namespace`) `spec.archival` asks for an Archival URI other than the one Temporal already holds. Temporal will not change it. Remove the `uri` to keep the existing destination, or replace the Namespace. |
 | `TypeConflict` | (`SearchAttribute`) An attribute of that name exists with a different type. Temporal cannot retype it; pick a different name or remove the existing attribute. |
 | `EndpointTaken` | (`NexusEndpoint`) An endpoint of that name already exists Service-wide and was not created by this resource. |
 | `Conflict` | (`NexusEndpoint`) The endpoint changed between being read and written. Self-correcting; the next reconcile retries from a fresh read. |
@@ -1061,6 +1205,20 @@ Temporal Cloud needs TLS and credentials — an API key or an mTLS certificate
 pair — while a self-hosted dev server typically needs neither. Everything
 downstream of the `Connection` is written the same way against either.
 
+The one exception is `spec.archival` on a `Namespace`:
+
+> Temporal Cloud does not support Temporal Server Archival. Use Temporal Cloud
+> [Export](https://docs.temporal.io/cloud/export) instead. Declaring archival
+> against a Service where Archival is unavailable causes the `Namespace` to
+> report `ArchivalUnavailable` rather than falsely reporting convergence.
+
+For self-hosted Temporal, the Service itself must be configured with an archival
+provider and its namespace defaults before any `Namespace` can enable Archival.
+See [Archival](#archival) and Temporal's [self-hosted Archival
+setup](https://docs.temporal.io/self-hosted-guide/archival). Cloud Export is
+configured through Temporal Cloud rather than the Temporal Namespace API, so
+this operator does not manage it.
+
 The operator does not run or manage Temporal in either case.
 
 ## Limitations
@@ -1073,6 +1231,15 @@ The operator does not run or manage Temporal in either case.
 * `SearchAttribute` and `NexusEndpoint` ownership is controller bookkeeping,
   not externally verifiable, because Temporal exposes no ownership metadata for
   either. Only `Namespace` ownership can be re-checked against Temporal.
+* `spec.archival` configures Archival on a Namespace. It does not provision the
+  archival storage, credentials or archiver plugin — those are Temporal Service
+  configuration, and must exist before a Namespace can enable Archival.
+* A Namespace's Archival URI cannot be changed once Temporal holds one. The
+  operator reports `ArchivalURIImmutable` rather than retrying; moving a
+  Namespace's archive destination means replacing the Temporal Namespace.
+* Temporal Cloud has no Server Archival, so `spec.archival` cannot be satisfied
+  there. Cloud Export is the Cloud capability, and it is configured outside the
+  Temporal Namespace API, so the operator does not manage it.
 * Two Kubernetes resources targeting the same Temporal Search Attribute or the
   same Nexus Endpoint are unsupported and will fight over it.
 * Nexus Endpoints support worker targets only; external URL targets are not

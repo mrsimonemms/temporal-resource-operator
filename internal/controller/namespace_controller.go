@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdkclient "go.temporal.io/sdk/client"
@@ -96,6 +97,17 @@ const (
 	// owns cannot be confirmed as its own from Temporal's own metadata, so a
 	// destructive operation has been refused.
 	ReasonOwnershipUnverified = "OwnershipUnverified"
+
+	// ReasonArchivalURIImmutable means spec.archival asks for an Archival URI
+	// other than the one Temporal already holds for the namespace. Temporal
+	// will not change a URI once it has one, so this is reported rather than
+	// retried.
+	ReasonArchivalURIImmutable = "ArchivalURIImmutable"
+
+	// ReasonArchivalUnavailable means the Temporal Service accepted an Archival
+	// change and did not apply it, which is how a Service not configured for
+	// Archival answers.
+	ReasonArchivalUnavailable = "ArchivalUnavailable"
 )
 
 // namespaceOwnerKey is the Temporal namespace metadata key under which the
@@ -154,8 +166,9 @@ const (
 // a Temporal Service.
 type TemporalNamespaceClient interface {
 	DescribeNamespace(ctx context.Context, name string) (*temporal.Namespace, error)
-	CreateNamespace(ctx context.Context, name string, retention time.Duration, data map[string]string) error
+	CreateNamespace(ctx context.Context, ns *temporal.Namespace) error
 	UpdateNamespaceRetention(ctx context.Context, name string, retention time.Duration) error
+	UpdateNamespaceArchival(ctx context.Context, name string, history, visibility *temporal.ArchivalConfig) error
 	DeleteNamespace(ctx context.Context, name string) error
 	Close()
 }
@@ -243,6 +256,17 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// event. Retrying on a timer would just repeat the same complaint.
 		log.Error(reconcileErr, "Namespace spec is invalid", "reason", reason)
 		return ctrl.Result{}, nil
+	case reason == ReasonArchivalURIImmutable, reason == ReasonArchivalUnavailable:
+		// Neither is something the operator can retry its way out of: the spec
+		// and the Temporal Service disagree about Archival, and one of the two
+		// has to change. Unlike an invalid retention, though, the change may
+		// well happen on the Service rather than in Kubernetes - Archival being
+		// enabled on it, say - and nothing would wake us for that. So this
+		// looks again on the ordinary resync rather than burning error backoff
+		// on a request that would be refused, or ignored, in exactly the same
+		// way.
+		log.Error(reconcileErr, "Failed to configure Temporal namespace archival", "reason", reason)
+		return ctrl.Result{RequeueAfter: namespaceResyncInterval}, nil
 	case reason == ReasonConnectionNotFound, reason == ReasonConnectionNotReady:
 		// The dependency will become ready on its own schedule. Waiting for it
 		// is not a failure, so retry on a fixed interval rather than burning
@@ -338,7 +362,25 @@ func (r *NamespaceReconciler) createNamespace(
 		data = map[string]string{namespaceOwnerKey: string(ns.UID)}
 	}
 
-	if err := temporalClient.CreateNamespace(ctx, name, retention, data); err != nil {
+	// Archival goes in the registration request rather than an update after it,
+	// so a namespace the operator creates is never briefly unarchived. An
+	// unmanaged kind is left unspecified, which takes the Service's default for
+	// new namespaces - exactly what happened before this was configurable.
+	archival := namespaceArchival{
+		history:    desiredArchival(ns.Spec.HistoryArchival()),
+		visibility: desiredArchival(ns.Spec.VisibilityArchival()),
+	}
+
+	desired := &temporal.Namespace{Name: name, Retention: retention, Data: data}
+	if archival.history != nil {
+		desired.HistoryArchival = *archival.history
+	}
+
+	if archival.visibility != nil {
+		desired.VisibilityArchival = *archival.visibility
+	}
+
+	if err := temporalClient.CreateNamespace(ctx, desired); err != nil {
 		return ReasonCreateFailed, "", err
 	}
 
@@ -349,7 +391,23 @@ func (r *NamespaceReconciler) createNamespace(
 		ns.Status.Ownership = temporalv1beta1.NamespaceOwnershipCreated
 	}
 
-	return ReasonCreated, fmt.Sprintf("Registered Temporal namespace %q with retention %s", name, retention), nil
+	message = fmt.Sprintf("Registered Temporal namespace %q with retention %s", name, retention)
+
+	if archival.wanted() {
+		// A Service not configured for Archival registers the namespace and
+		// drops the Archival settings, so what was asked for has to be read
+		// back before it can be reported as done. Ownership is already settled
+		// above, so a failure here leaves a namespace that exists and is known
+		// to be this resource's - it is a misconfiguration to report, not a
+		// half-finished create.
+		if reason, err := confirmArchival(ctx, ns, temporalClient); err != nil {
+			return reason, "", err
+		}
+
+		message = fmt.Sprintf("%s, %s", message, archival.summary())
+	}
+
+	return ReasonCreated, message, nil
 }
 
 // reconcileExisting takes ownership of a Temporal namespace that already exists
@@ -379,21 +437,53 @@ func (r *NamespaceReconciler) reconcileExisting(
 		return ReasonInvalidRetention, "", err
 	}
 
-	if actual.Retention == desired {
-		if adopting {
-			return ReasonAdopted, fmt.Sprintf("Adopted existing Temporal namespace %q", name), nil
+	// Both kinds of drift are worked out before either is written, so a spec
+	// asking for something Temporal will not do is refused without half of it
+	// having been applied first.
+	archival, err := archivalUpdate(ns, actual)
+	if err != nil {
+		return ReasonArchivalURIImmutable, "", err
+	}
+
+	// What was corrected, in the order it was corrected, for the Ready
+	// condition. Empty means the namespace already matched the spec.
+	changes := make([]string, 0, 2)
+
+	if actual.Retention != desired {
+		if err := temporalClient.UpdateNamespaceRetention(ctx, name, desired); err != nil {
+			return ReasonUpdateFailed, "", err
 		}
 
+		changes = append(changes, fmt.Sprintf("retention from %s to %s", actual.Retention, desired))
+	}
+
+	if archival.wanted() {
+		if err := temporalClient.UpdateNamespaceArchival(ctx, name, archival.history, archival.visibility); err != nil {
+			return ReasonUpdateFailed, "", err
+		}
+
+		// The Service answers successfully whether or not it applied this, so
+		// read it back before claiming it is done.
+		if reason, err := confirmArchival(ctx, ns, temporalClient); err != nil {
+			return reason, "", err
+		}
+
+		changes = append(changes, archival.summary())
+	}
+
+	switch {
+	case len(changes) > 0:
+		// A correction outranks the adoption that may have happened alongside
+		// it: what the reconcile did is the more useful thing to report, and
+		// status.ownership is the durable record of the other.
+		return ReasonUpdated, fmt.Sprintf(
+			"Updated Temporal namespace %q %s", name, strings.Join(changes, ", "),
+		), nil
+	case adopting:
+		return ReasonAdopted, fmt.Sprintf("Adopted existing Temporal namespace %q", name), nil
+	default:
 		return ReasonReconciled, fmt.Sprintf("Temporal namespace %q matches the spec", name), nil
 	}
-
-	if err := temporalClient.UpdateNamespaceRetention(ctx, name, desired); err != nil {
-		return ReasonUpdateFailed, "", err
-	}
-
-	return ReasonUpdated, fmt.Sprintf(
-		"Updated Temporal namespace %q retention from %s to %s", name, actual.Retention, desired,
-	), nil
 }
 
 // ownerOf reads the ownership marker off a Temporal namespace and compares it

@@ -19,6 +19,24 @@ spec:
   # behind when this resource is deleted - which is also how a deletion blocked
   # on a missing Connection is released.
   deletionPolicy: Delete
+  # Archival, instead of "temporal operator namespace update
+  # --history-archival-state enabled". The two kinds are independent, and each
+  # is only managed while it is here: remove a block and the operator stops
+  # having an opinion rather than turning that Archival off.
+  #
+  # The Temporal Service has to be configured for Archival before a namespace
+  # can enable it. A Service that is not - Temporal Cloud included, where Export
+  # takes Archival's place - accepts the request and ignores it, and the operator
+  # reports ArchivalUnavailable rather than claiming success.
+  archival:
+    history:
+      enabled: true
+      # Optional. Left out, the Service supplies its configured default, which
+      # is the usual case. Whichever way it is set, Temporal will not change a
+      # namespace's Archival URI afterwards.
+      # uri: s3://my-bucket/temporal-archival
+    visibility:
+      enabled: true
 ---
 # This is exists before the operator - if this is deleted, it
 # is NOT deleted from Temporal. However, it will still update
@@ -36,3 +54,8 @@ spec:
     name: connection-sample
   retention: 1d
   deletionPolicy: Orphan
+  # Only history Archival is managed here, so whatever this namespace does about
+  # visibility Archival is left exactly as it is.
+  archival:
+    history:
+      enabled: true

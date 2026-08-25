@@ -142,6 +142,39 @@ var _ = Describe("Generated CRDs", func() {
 	}
 })
 
+// archivalSchema is the slice of the Namespace CRD describing spec.archival. It
+// is parsed separately from crd because it is the only part of the schema with
+// nested objects and required fields worth asserting on.
+type archivalSchema struct {
+	Spec struct {
+		Versions []struct {
+			Schema struct {
+				OpenAPIV3Schema struct {
+					Properties struct {
+						Spec struct {
+							Properties struct {
+								Archival struct {
+									Type       string   `json:"type"`
+									Required   []string `json:"required"`
+									Properties map[string]struct {
+										Type       string   `json:"type"`
+										Required   []string `json:"required"`
+										Properties map[string]struct {
+											Type      string `json:"type"`
+											MinLength *int64 `json:"minLength"`
+											Default   any    `json:"default"`
+										} `json:"properties"`
+									} `json:"properties"`
+								} `json:"archival"`
+							} `json:"properties"`
+						} `json:"spec"`
+					} `json:"properties"`
+				} `json:"openAPIV3Schema"`
+			} `json:"schema"`
+		} `json:"versions"`
+	} `json:"spec"`
+}
+
 var _ = Describe("The generated Namespace CRD", func() {
 	var parsed crd
 
@@ -149,6 +182,96 @@ var _ = Describe("The generated Namespace CRD", func() {
 		raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_namespaces.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(yaml.Unmarshal(raw, &parsed)).To(Succeed())
+	})
+
+	// Everything the operator does about Archival rests on being able to tell
+	// "not managed" from "managed, and off". That distinction is the schema's to
+	// keep: a block admitted without `enabled` would decode to the zero value
+	// and read as an explicit request to disable, which is the one mistake the
+	// API must not let a user make by accident.
+	Describe("spec.archival", func() {
+		var archival archivalSchema
+
+		BeforeEach(func() {
+			raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_namespaces.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(yaml.Unmarshal(raw, &archival)).To(Succeed())
+			Expect(archival.Spec.Versions).To(HaveLen(1))
+		})
+
+		// block is one of the two kinds, which have to stay identical to each
+		// other: history and visibility are the same shape applied to different
+		// data.
+		block := func(kind string) struct {
+			Type       string   `json:"type"`
+			Required   []string `json:"required"`
+			Properties map[string]struct {
+				Type      string `json:"type"`
+				MinLength *int64 `json:"minLength"`
+				Default   any    `json:"default"`
+			} `json:"properties"`
+		} {
+			props := archival.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec.Properties.Archival.Properties
+			Expect(props).To(HaveKey(kind))
+
+			return props[kind]
+		}
+
+		It("should be an optional object, so archival can go unmanaged", func() {
+			schema := archival.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec.Properties.Archival
+
+			Expect(schema.Type).To(Equal("object"))
+			Expect(schema.Required).To(BeEmpty(),
+				"neither kind may be required, or every Namespace would have to manage archival")
+		})
+
+		It("should carry both kinds, and nothing else", func() {
+			props := archival.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec.Properties.Archival.Properties
+
+			Expect(props).To(HaveLen(2))
+			Expect(props).To(HaveKey("history"))
+			Expect(props).To(HaveKey("visibility"))
+		})
+
+		for _, kind := range []string{"history", "visibility"} {
+			Context(kind, func() {
+				It("should require enabled once the block is present", func() {
+					Expect(block(kind).Type).To(Equal("object"))
+					Expect(block(kind).Required).To(Equal([]string{"enabled"}))
+				})
+
+				It("should keep enabled a boolean with no default", func() {
+					enabled := block(kind).Properties["enabled"]
+
+					Expect(enabled.Type).To(Equal("boolean"))
+					Expect(enabled.Default).To(BeNil(),
+						"a default would make archival managed by accident")
+				})
+
+				It("should keep uri an optional non-empty string", func() {
+					uri := block(kind).Properties["uri"]
+
+					Expect(uri.Type).To(Equal("string"))
+					Expect(block(kind).Required).NotTo(ContainElement("uri"),
+						"Temporal supplies a URI when a namespace enables archival without one")
+					Expect(uri.MinLength).NotTo(BeNil())
+					Expect(*uri.MinLength).To(BeNumerically("==", 1))
+					Expect(uri.Default).To(BeNil(),
+						"the Service's own default is the only default there is")
+				})
+
+				It("should put no scheme restriction on uri", func() {
+					// Which URI schemes work depends entirely on the archivers
+					// the Temporal Service is configured with, so the schema
+					// must not have an opinion. It would only ever be wrong for
+					// somebody.
+					uri := block(kind).Properties["uri"]
+
+					Expect(uri.Type).To(Equal("string"))
+					Expect(block(kind).Properties).To(HaveLen(2))
+				})
+			})
+		}
 	})
 
 	// The retention field is the reason Duration exists. If the schema stops
