@@ -317,17 +317,24 @@ var _ = Describe("Schedule admission", func() {
 			Entry("year 2100", "year", int64(2100)),
 		)
 
-		It("should refuse a range whose end is before its start", func() {
-			err := k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+		It("should admit a range whose end is before its start, and leave it to the operator", func() {
+			// The one calendar rule that is not in the schema. Comparing two
+			// fields of the same object needs CEL, and a CEL rule inside these
+			// lists would make Kubernetes demand a maxItems on every collection
+			// containing them - which Temporal does not cap. So this is caught
+			// by the operator's own validation instead, and reported as
+			// InvalidSchedule.
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
 				spec["schedule"] = map[string]any{
 					"calendars": []any{map[string]any{
 						"hour": []any{map[string]any{"start": int64(9), "end": int64(3)}},
 					}},
 				}
-			}))
+			}))).To(Succeed())
 
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("hour end must be between start"))
+			Expect(stored().Spec.Validate()).To(
+				MatchError(ContainSubstring("end 3 is not between start 9")),
+			)
 		})
 
 		It("should refuse a step below one", func() {
@@ -433,12 +440,6 @@ var _ = Describe("Schedule admission", func() {
 			Entry("a leading dot", ".5"),
 		)
 
-		It("should refuse a limited action count below one", func() {
-			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
-				spec["state"] = map[string]any{"limitedActions": int64(0)}
-			}))).NotTo(Succeed())
-		})
-
 		It("should refuse a schedule ID past Temporal's limit", func() {
 			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
 				spec["scheduleId"] = string(make([]byte, temporalv1beta1.MaxScheduleIDLength+1))
@@ -455,17 +456,6 @@ var _ = Describe("Schedule admission", func() {
 			}))).NotTo(Succeed())
 		})
 
-		It("should refuse more timing rules than the collection allows", func() {
-			tooMany := make([]any, temporalv1beta1.MaxScheduleSpecItems+1)
-			for i := range tooMany {
-				tooMany[i] = "@daily"
-			}
-
-			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
-				spec["schedule"] = map[string]any{"cron": tooMany}
-			}))).NotTo(Succeed())
-		})
-
 		It("should refuse a duration the operator could not decode", func() {
 			// The Namespace retention lesson applied to every duration on a
 			// Schedule: a value only the API server accepts is one that breaks
@@ -477,6 +467,152 @@ var _ = Describe("Schedule admission", func() {
 					}
 				}))).NotTo(Succeed(), every)
 			}
+		})
+	})
+
+	Describe("collections Temporal does not limit", func() {
+		// The pinned Service imposes no count limit on calendars, intervals or
+		// cron strings. An operator cap would therefore refuse a schedule
+		// Temporal would have accepted, which is the operator inventing policy.
+		// Fifty-one entries is one past the cap that used to be here.
+		const beyondTheOldCap = 51
+
+		It("should admit fifty-one cron expressions", func() {
+			cron := make([]any, beyondTheOldCap)
+			for i := range cron {
+				cron[i] = fmt.Sprintf("%d 2 * * *", i)
+			}
+
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{"cron": cron}
+			}))).To(Succeed())
+
+			Expect(stored().Spec.Schedule.Cron).To(HaveLen(beyondTheOldCap))
+		})
+
+		It("should admit fifty-one calendars", func() {
+			calendars := make([]any, beyondTheOldCap)
+			for i := range calendars {
+				calendars[i] = map[string]any{
+					"minute": []any{map[string]any{"start": int64(i % 60)}},
+				}
+			}
+
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{"calendars": calendars}
+			}))).To(Succeed())
+
+			Expect(stored().Spec.Schedule.Calendars).To(HaveLen(beyondTheOldCap))
+		})
+
+		It("should admit fifty-one intervals", func() {
+			intervals := make([]any, beyondTheOldCap)
+			for i := range intervals {
+				intervals[i] = map[string]any{"every": fmt.Sprintf("%dm", i+1)}
+			}
+
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{"intervals": intervals}
+			}))).To(Succeed())
+
+			Expect(stored().Spec.Schedule.Intervals).To(HaveLen(beyondTheOldCap))
+		})
+
+		It("should admit fifty-one exclusions, inputs and search attributes", func() {
+			excludeCalendars := make([]any, beyondTheOldCap)
+			input := make([]any, beyondTheOldCap)
+			searchAttributes := make([]any, beyondTheOldCap)
+
+			for i := range beyondTheOldCap {
+				excludeCalendars[i] = map[string]any{
+					"minute": []any{map[string]any{"start": int64(i % 60)}},
+				}
+				input[i] = fmt.Sprintf("%d", i)
+				searchAttributes[i] = map[string]any{
+					"name":  fmt.Sprintf("Attr%d", i),
+					"type":  "Int",
+					"value": fmt.Sprintf("%d", i),
+				}
+			}
+
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{
+					"cron":             []any{"@daily"},
+					"excludeCalendars": excludeCalendars,
+				}
+				spec["searchAttributes"] = searchAttributes
+				spec["action"] = map[string]any{"workflow": map[string]any{
+					"type":             "ReconcilePayments",
+					"taskQueue":        "payments",
+					"input":            input,
+					"searchAttributes": searchAttributes,
+				}}
+			}))).To(Succeed())
+
+			schedule := stored()
+			Expect(schedule.Spec.Schedule.ExcludeCalendars).To(HaveLen(beyondTheOldCap))
+			Expect(schedule.Spec.Action.Workflow.Input).To(HaveLen(beyondTheOldCap))
+			Expect(schedule.Spec.SearchAttributes).To(HaveLen(beyondTheOldCap))
+		})
+
+		It("should still refuse an invalid entry among fifty-one valid ones", func() {
+			// Removing the count limit removes nothing else. Each entry is
+			// checked exactly as it was.
+			calendars := make([]any, beyondTheOldCap)
+			for i := range calendars {
+				calendars[i] = map[string]any{
+					"minute": []any{map[string]any{"start": int64(i % 60)}},
+				}
+			}
+
+			calendars[beyondTheOldCap-1] = map[string]any{
+				"hour": []any{map[string]any{"start": int64(24)}},
+			}
+
+			err := k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{"calendars": calendars}
+			}))
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("should be less than or equal to 23"))
+		})
+
+		It("should still insist on at least one rule, however many there could be", func() {
+			err := k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["schedule"] = map[string]any{"timeZone": "UTC"}
+			}))
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("at least one of calendars, intervals or cron"))
+		})
+	})
+
+	Describe("what the API no longer offers", func() {
+		It("should prune a remaining-action count rather than storing it", func() {
+			// Structural schema pruning is what proves the field is gone: an
+			// unknown key is dropped on the way in rather than kept, so nothing
+			// can go on depending on it.
+			Expect(k8sClient.Create(ctx, withSpec(func(spec map[string]any) {
+				spec["state"] = map[string]any{"paused": false, "limitedActions": int64(10)}
+			}))).To(Succeed())
+
+			schedule := stored()
+			Expect(schedule.Spec.State).NotTo(BeNil())
+			Expect(schedule.Spec.State.Paused).NotTo(BeNil())
+			Expect(*schedule.Spec.State.Paused).To(BeFalse())
+
+			// And the API server did not keep it.
+			raw := &unstructured.Unstructured{}
+			raw.SetGroupVersionKind(offer(validSpec()).GroupVersionKind())
+			Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: name, Namespace: namespace}, raw)).To(Succeed())
+
+			state, found, err := unstructured.NestedMap(raw.Object, "spec", "state")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(state).To(HaveKey("paused"))
+			Expect(state).NotTo(HaveKey("limitedActions"))
+			Expect(state).NotTo(HaveKey("remainingActions"))
 		})
 	})
 

@@ -95,6 +95,12 @@ type fakeSchedule struct {
 
 	paused bool
 	notes  string
+
+	// remainingActions is Temporal's own counter. The Service ticks it down as
+	// the schedule acts and carries it across an update, so the fake does too -
+	// nothing the operator sends can set it.
+	remainingActions int64
+	limitedActions   bool
 }
 
 func (f *fakeScheduleClient) DescribeSchedule(
@@ -113,13 +119,15 @@ func (f *fakeScheduleClient) DescribeSchedule(
 	}
 
 	answer := temporal.NewFakeSchedule(&temporal.FakeScheduleOptions{
-		ID:            id,
-		Namespace:     namespace,
-		Desired:       schedule.desired,
-		TimingHash:    schedule.timing,
-		Paused:        schedule.paused,
-		Notes:         schedule.notes,
-		ConflictToken: fmt.Appendf(nil, "%d", schedule.generation),
+		ID:               id,
+		Namespace:        namespace,
+		Desired:          schedule.desired,
+		TimingHash:       schedule.timing,
+		Paused:           schedule.paused,
+		Notes:            schedule.notes,
+		RemainingActions: schedule.remainingActions,
+		LimitedActions:   schedule.limitedActions,
+		ConflictToken:    fmt.Appendf(nil, "%d", schedule.generation),
 	})
 
 	if f.onDescribe != nil {
@@ -204,10 +212,16 @@ func (f *fakeScheduleClient) put(desired *temporal.ScheduleDesired) {
 	generation := 1
 	paused, notes := false, ""
 
+	var (
+		remainingActions int64
+		limitedActions   bool
+	)
+
 	if previous != nil {
 		generation = previous.generation + 1
 		// State the spec does not declare survives, as it does on the Service.
 		paused, notes = previous.paused, previous.notes
+		remainingActions, limitedActions = previous.remainingActions, previous.limitedActions
 	}
 
 	if desired.State.Paused != nil {
@@ -219,11 +233,13 @@ func (f *fakeScheduleClient) put(desired *temporal.ScheduleDesired) {
 	}
 
 	f.existing[desired.ID] = &fakeSchedule{
-		desired:    desired,
-		generation: generation,
-		timing:     temporal.FakeCanonicalTiming(&desired.Timing),
-		paused:     paused,
-		notes:      notes,
+		desired:          desired,
+		generation:       generation,
+		timing:           temporal.FakeCanonicalTiming(&desired.Timing),
+		paused:           paused,
+		notes:            notes,
+		remainingActions: remainingActions,
+		limitedActions:   limitedActions,
 	}
 }
 
@@ -236,6 +252,17 @@ func (f *fakeScheduleClient) pauseOutsideTheOperator(id string) {
 
 	schedule.paused = true
 	schedule.notes = "paused by a human"
+	schedule.generation++
+}
+
+// consumeActionOutsideTheOperator ticks the remaining-action counter down, the
+// way the Service does each time the schedule acts. It bumps the generation
+// too, because the Service's own write does.
+func (f *fakeScheduleClient) consumeActionOutsideTheOperator(id string) {
+	schedule, ok := f.existing[id]
+	Expect(ok).To(BeTrue(), "the schedule should exist")
+
+	schedule.remainingActions--
 	schedule.generation++
 }
 
@@ -741,7 +768,7 @@ var _ = Describe("Schedule Controller", func() {
 				func(spec *temporalv1beta1.ScheduleSpec) {
 					spec.Schedule.Cron = nil
 					spec.Schedule.Calendars = []temporalv1beta1.ScheduleCalendar{{
-						Hour: []temporalv1beta1.ScheduleRange{{Start: 9}},
+						Hour: []temporalv1beta1.ScheduleRange0To23{{Start: 9}},
 					}}
 				},
 				func(desired *temporal.ScheduleDesired) {
@@ -758,7 +785,7 @@ var _ = Describe("Schedule Controller", func() {
 						{Every: temporalv1beta1.Duration{Duration: 6 * time.Hour}},
 					}
 					spec.Schedule.Calendars = []temporalv1beta1.ScheduleCalendar{{
-						Hour: []temporalv1beta1.ScheduleRange{{Start: 9}},
+						Hour: []temporalv1beta1.ScheduleRange0To23{{Start: 9}},
 					}}
 				},
 				func(desired *temporal.ScheduleDesired) {
@@ -829,7 +856,6 @@ var _ = Describe("Schedule Controller", func() {
 			desired := temporalClient.created[0].desired
 			Expect(desired.State.Paused).To(BeNil())
 			Expect(desired.State.Notes).To(BeNil())
-			Expect(desired.State.LimitedActions).To(BeNil())
 			Expect(desired.Memo).To(BeNil())
 			Expect(desired.SearchAttributes).To(BeNil())
 		})
@@ -1099,6 +1125,90 @@ var _ = Describe("Schedule Controller", func() {
 			Expect(temporalClient.updated).To(HaveLen(1))
 			Expect(temporalSchedule().paused).To(BeFalse())
 			Expect(readyCondition().Message).To(ContainSubstring("state.paused"))
+		})
+
+		Describe("Temporal's remaining-action counter", func() {
+			// The counter is runtime state, not desired state: the Service ticks
+			// it down as the schedule acts. Reconciling it would put the
+			// declared number back every time the operator looked, and a
+			// schedule asked to run ten times would run for ever. So the CRD
+			// cannot express it, nothing compares it, and every write carries it
+			// across untouched.
+			BeforeEach(func() {
+				schedule := temporalSchedule()
+				schedule.limitedActions = true
+				schedule.remainingActions = 10
+			})
+
+			It("should not update when the Service consumes an action", func() {
+				temporalClient.consumeActionOutsideTheOperator(scheduleID)
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(BeEmpty(),
+					"a counter ticking down is not drift")
+				Expect(readyCondition().Reason).To(Equal(ReasonReconciled))
+				Expect(temporalSchedule().remainingActions).To(BeNumerically("==", 9))
+			})
+
+			It("should not restore the count over repeated reconciles", func() {
+				// The failure mode in full: the Service consumes an action, the
+				// operator looks, and the count must keep falling.
+				for expected := 9; expected >= 6; expected-- {
+					temporalClient.consumeActionOutsideTheOperator(scheduleID)
+
+					_, err := reconcile()
+					Expect(err).NotTo(HaveOccurred())
+
+					Expect(temporalSchedule().remainingActions).
+						To(BeNumerically("==", expected), "the operator must never put the count back")
+				}
+
+				Expect(temporalClient.updated).To(BeEmpty())
+			})
+
+			It("should preserve the count when it does write for another reason", func() {
+				temporalClient.consumeActionOutsideTheOperator(scheduleID)
+
+				updateSchedule(func(spec *temporalv1beta1.ScheduleSpec) {
+					spec.Schedule.Cron = []string{"@hourly"}
+					spec.Action.Workflow.TaskQueue = "payments-v2"
+					spec.Policies = &temporalv1beta1.SchedulePolicies{
+						Overlap: temporalv1beta1.ScheduleOverlapPolicyAllowAll,
+					}
+					paused := true
+					spec.State = &temporalv1beta1.ScheduleStateSpec{Paused: &paused}
+				})
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.updated).To(HaveLen(1))
+				Expect(readyCondition().Reason).To(Equal(ReasonUpdated))
+
+				// Everything asked for changed; the counter did not.
+				schedule := temporalSchedule()
+				Expect(schedule.paused).To(BeTrue())
+				Expect(schedule.desired.Workflow.TaskQueue).To(Equal("payments-v2"))
+				Expect(schedule.remainingActions).To(BeNumerically("==", 9),
+					"a write for another reason must not reset the counter")
+				Expect(schedule.limitedActions).To(BeTrue())
+			})
+
+			It("should send nothing about the counter when it creates a schedule", func() {
+				// Nothing can declare it, so a create leaves the Service to
+				// apply its own defaults.
+				delete(temporalClient.existing, scheduleID)
+				resetTemporalCalls()
+
+				_, err := reconcile()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(temporalClient.created).To(HaveLen(1))
+				Expect(temporalClient.created[0].desired.State.Paused).To(BeNil())
+				Expect(temporalClient.created[0].desired.State.Notes).To(BeNil())
+			})
 		})
 
 		It("should report every managed field that drifted", func() {

@@ -64,14 +64,6 @@ const (
 	MaxCalendarYear = 2100
 )
 
-// MaxScheduleSpecItems bounds each collection of schedule rules.
-//
-// This one is the operator's, not Temporal's: the pinned Service imposes no
-// count limit on calendars, intervals or cron strings, so nothing here mirrors a
-// server constant. It exists so that a Schedule cannot grow without bound in
-// etcd, and is set far above any plausible schedule.
-const MaxScheduleSpecItems = 50
-
 // ScheduleDeletionPolicy decides what becomes of the Temporal schedule when the
 // resource managing it is deleted.
 //
@@ -173,53 +165,217 @@ const (
 	ScheduleOverlapPolicyAllowAll ScheduleOverlapPolicy = "AllowAll"
 )
 
-// ScheduleRange is a set of integer values a calendar field can match, written
-// as a start, an optional inclusive end and an optional step.
+// A calendar field matches a set of values, written as ranges: a start, an
+// optional inclusive end and an optional step. It is Temporal's own Range, and
+// "start" alone matches one value.
 //
-// It is Temporal's own Range: "start" alone matches one value, and step counts
-// from start. What the fields may hold depends on which calendar field the range
-// belongs to, so the bounds are enforced on each field rather than here.
-type ScheduleRange struct {
+// There is a type per field rather than one shared one, because each field has
+// its own bounds and those bounds belong in the schema. Expressing them as
+// plain minimum and maximum - rather than as a CEL rule walking the list - is
+// what lets every collection on a Schedule stay unbounded: Kubernetes refuses a
+// CRD whose CEL rules could run over an unbounded list, and would have forced
+// an arbitrary cap on how many calendars a schedule may have. Temporal imposes
+// no such cap, so neither does this.
+//
+// The types are otherwise identical, and the names they are declared under
+// never reach the generated schema - controller-gen inlines them - so they are
+// named after the values they hold.
+
+// ScheduleRange0To59 is a range of seconds or minutes.
+type ScheduleRange0To59 struct {
 	// start is the first value in the range, and is matched itself.
 	// +required
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=59
 	Start int32 `json:"start"`
 
-	// end is the last value in the range, and is matched itself.
-	//
-	// Omit it to match start alone. Temporal reads an end below start as equal
-	// to start; this API asks for an end that is genuinely an end, so that a
-	// range reading backwards is a mistake caught on the way in rather than
-	// silently narrowed to one value.
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
 	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=59
 	End *int32 `json:"end,omitempty"`
 
 	// step is how far apart the matched values are within the range - 2 matches
-	// every other value.
-	//
-	// Omit it for every value, which is what Temporal does with a step of 0.
+	// every other value. Omit it for every value.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Step *int32 `json:"step,omitempty"`
 }
 
-// EndValue returns the range's effective inclusive end, which is start when no
-// end was given.
-func (r ScheduleRange) EndValue() int32 {
-	if r.End == nil {
-		return r.Start
-	}
+// ScheduleRange0To23 is a range of hours.
+type ScheduleRange0To23 struct {
+	// start is the first value in the range, and is matched itself.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=23
+	Start int32 `json:"start"`
 
-	return *r.End
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=23
+	End *int32 `json:"end,omitempty"`
+
+	// step is how far apart the matched values are within the range. Omit it
+	// for every value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Step *int32 `json:"step,omitempty"`
 }
 
-// StepValue returns the range's effective step, which is 1 when none was given.
-func (r ScheduleRange) StepValue() int32 {
-	if r.Step == nil {
+// ScheduleRange1To31 is a range of days of the month.
+type ScheduleRange1To31 struct {
+	// start is the first value in the range, and is matched itself.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=31
+	Start int32 `json:"start"`
+
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=31
+	End *int32 `json:"end,omitempty"`
+
+	// step is how far apart the matched values are within the range. Omit it
+	// for every value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Step *int32 `json:"step,omitempty"`
+}
+
+// ScheduleRange1To12 is a range of months.
+type ScheduleRange1To12 struct {
+	// start is the first value in the range, and is matched itself.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=12
+	Start int32 `json:"start"`
+
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=12
+	End *int32 `json:"end,omitempty"`
+
+	// step is how far apart the matched values are within the range. Omit it
+	// for every value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Step *int32 `json:"step,omitempty"`
+}
+
+// ScheduleRange0To6 is a range of days of the week, where 0 is Sunday.
+type ScheduleRange0To6 struct {
+	// start is the first value in the range, and is matched itself. 0 is Sunday.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=6
+	Start int32 `json:"start"`
+
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=6
+	End *int32 `json:"end,omitempty"`
+
+	// step is how far apart the matched values are within the range. Omit it
+	// for every value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Step *int32 `json:"step,omitempty"`
+}
+
+// ScheduleRange2000To2100 is a range of years, bounded by the Service's own
+// minCalendarYear and maxCalendarYear.
+type ScheduleRange2000To2100 struct {
+	// start is the first value in the range, and is matched itself.
+	// +required
+	// +kubebuilder:validation:Minimum=2000
+	// +kubebuilder:validation:Maximum=2100
+	Start int32 `json:"start"`
+
+	// end is the last value in the range, and is matched itself. Omit it to
+	// match start alone.
+	// +optional
+	// +kubebuilder:validation:Minimum=2000
+	// +kubebuilder:validation:Maximum=2100
+	End *int32 `json:"end,omitempty"`
+
+	// step is how far apart the matched values are within the range. Omit it
+	// for every value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Step *int32 `json:"step,omitempty"`
+}
+
+// ScheduleCalendarRange is what every calendar field's range offers, so that the
+// code turning a calendar into a Temporal request - and the code checking it -
+// can be written once rather than six times.
+//
+// It is not part of the serialised API, only of the Go one, so it is excluded
+// from deepcopy generation.
+//
+// +kubebuilder:object:generate=false
+type ScheduleCalendarRange interface {
+	// StartValue is the first value in the range.
+	StartValue() int32
+
+	// EndValue is the last value in the range, which is the start when no end
+	// was given.
+	EndValue() int32
+
+	// StepValue is the step between matched values, which is 1 when none was
+	// given.
+	StepValue() int32
+}
+
+// rangeEnd resolves an optional end against its start.
+func rangeEnd(start int32, end *int32) int32 {
+	if end == nil {
+		return start
+	}
+
+	return *end
+}
+
+// rangeStep resolves an optional step, which Temporal reads as 1 when unset.
+func rangeStep(step *int32) int32 {
+	if step == nil {
 		return 1
 	}
 
-	return *r.Step
+	return *step
 }
+
+func (r ScheduleRange0To59) StartValue() int32 { return r.Start }
+func (r ScheduleRange0To59) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange0To59) StepValue() int32  { return rangeStep(r.Step) }
+
+func (r ScheduleRange0To23) StartValue() int32 { return r.Start }
+func (r ScheduleRange0To23) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange0To23) StepValue() int32  { return rangeStep(r.Step) }
+
+func (r ScheduleRange1To31) StartValue() int32 { return r.Start }
+func (r ScheduleRange1To31) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange1To31) StepValue() int32  { return rangeStep(r.Step) }
+
+func (r ScheduleRange1To12) StartValue() int32 { return r.Start }
+func (r ScheduleRange1To12) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange1To12) StepValue() int32  { return rangeStep(r.Step) }
+
+func (r ScheduleRange0To6) StartValue() int32 { return r.Start }
+func (r ScheduleRange0To6) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange0To6) StepValue() int32  { return rangeStep(r.Step) }
+
+func (r ScheduleRange2000To2100) StartValue() int32 { return r.Start }
+func (r ScheduleRange2000To2100) EndValue() int32   { return rangeEnd(r.Start, r.End) }
+func (r ScheduleRange2000To2100) StepValue() int32  { return rangeStep(r.Step) }
 
 // ScheduleCalendar matches times against the calendar, the way a cron expression
 // does but written out in full.
@@ -236,65 +392,37 @@ func (r ScheduleRange) StepValue() int32 {
 //   - year: omitted matches all
 //
 // The bounds on each field are Temporal's own, checked by the Service in
-// validateStructuredCalendar.
+// validateStructuredCalendar and carried here by the range type each field
+// takes. Nothing limits how many ranges a field may hold, or how many calendars
+// a schedule may have, because Temporal limits neither.
 type ScheduleCalendar struct {
 	// second ranges to match, 0-59. Omitted matches second 0.
 	// +optional
-	// +kubebuilder:validation:MaxItems=60
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 0 && r.start <= 59)",message="second start must be between 0 and 59"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 59))",message="second end must be between start and 59"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	Second []ScheduleRange `json:"second,omitempty"`
+	Second []ScheduleRange0To59 `json:"second,omitempty"`
 
 	// minute ranges to match, 0-59. Omitted matches minute 0.
 	// +optional
-	// +kubebuilder:validation:MaxItems=60
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 0 && r.start <= 59)",message="minute start must be between 0 and 59"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 59))",message="minute end must be between start and 59"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	Minute []ScheduleRange `json:"minute,omitempty"`
+	Minute []ScheduleRange0To59 `json:"minute,omitempty"`
 
 	// hour ranges to match, 0-23. Omitted matches hour 0.
 	// +optional
-	// +kubebuilder:validation:MaxItems=24
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 0 && r.start <= 23)",message="hour start must be between 0 and 23"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 23))",message="hour end must be between start and 23"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	Hour []ScheduleRange `json:"hour,omitempty"`
+	Hour []ScheduleRange0To23 `json:"hour,omitempty"`
 
 	// dayOfMonth ranges to match, 1-31. Omitted matches every day.
 	// +optional
-	// +kubebuilder:validation:MaxItems=31
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 1 && r.start <= 31)",message="dayOfMonth start must be between 1 and 31"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 31))",message="dayOfMonth end must be between start and 31"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	DayOfMonth []ScheduleRange `json:"dayOfMonth,omitempty"`
+	DayOfMonth []ScheduleRange1To31 `json:"dayOfMonth,omitempty"`
 
 	// month ranges to match, 1-12 where 1 is January. Omitted matches every
 	// month.
 	// +optional
-	// +kubebuilder:validation:MaxItems=12
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 1 && r.start <= 12)",message="month start must be between 1 and 12"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 12))",message="month end must be between start and 12"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	Month []ScheduleRange `json:"month,omitempty"`
+	Month []ScheduleRange1To12 `json:"month,omitempty"`
 
 	// year ranges to match, 2000-2100. Omitted matches every year, which is
 	// almost always what you want.
 	//
 	// The bounds are the Service's own minCalendarYear and maxCalendarYear.
 	// +optional
-	// +kubebuilder:validation:MaxItems=101
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 2000 && r.start <= 2100)",message="year start must be between 2000 and 2100"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 2100))",message="year end must be between start and 2100"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	Year []ScheduleRange `json:"year,omitempty"`
+	Year []ScheduleRange2000To2100 `json:"year,omitempty"`
 
 	// dayOfWeek ranges to match, 0-6 where **0 is Sunday**. Omitted matches
 	// every day.
@@ -302,12 +430,7 @@ type ScheduleCalendar struct {
 	// Sunday being 0 is Temporal's numbering, taken from Go's time.Weekday, and
 	// is what the Service matches against.
 	// +optional
-	// +kubebuilder:validation:MaxItems=7
-	// +kubebuilder:validation:XValidation:rule="self.all(r, r.start >= 0 && r.start <= 6)",message="dayOfWeek start must be between 0 and 6, where 0 is Sunday"
-	// +kubebuilder:validation:XValidation:rule="self.all(r, !has(r.end) || (r.end >= r.start && r.end <= 6))",message="dayOfWeek end must be between start and 6"
-	//
-	//nolint:lll // kubebuilder markers cannot be wrapped
-	DayOfWeek []ScheduleRange `json:"dayOfWeek,omitempty"`
+	DayOfWeek []ScheduleRange0To6 `json:"dayOfWeek,omitempty"`
 
 	// comment describes what this calendar is for. Temporal stores it on the
 	// calendar and shows it in its UI.
@@ -354,13 +477,11 @@ type ScheduleInterval struct {
 type ScheduleTiming struct {
 	// calendars match times against the calendar, written out in full.
 	// +optional
-	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:MinItems=1
 	Calendars []ScheduleCalendar `json:"calendars,omitempty"`
 
 	// intervals match times at a fixed period.
 	// +optional
-	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:MinItems=1
 	Intervals []ScheduleInterval `json:"intervals,omitempty"`
 
@@ -389,7 +510,6 @@ type ScheduleTiming struct {
 	// documentation - but it does mean the Temporal UI will show a calendar
 	// where you wrote cron.
 	// +optional
-	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=1000
@@ -399,7 +519,6 @@ type ScheduleTiming struct {
 	// matched. Every field of an exclusion, seconds included, has to match a
 	// time for that time to be skipped.
 	// +optional
-	// +kubebuilder:validation:MaxItems=50
 	// +kubebuilder:validation:MinItems=1
 	ExcludeCalendars []ScheduleCalendar `json:"excludeCalendars,omitempty"`
 
@@ -562,7 +681,6 @@ type ScheduleWorkflow struct {
 	// filesystem, and a payload that cannot be read in the spec cannot be
 	// reviewed in a pull request.
 	// +optional
-	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MinLength=1
 	Input []string `json:"input,omitempty"`
 
@@ -579,7 +697,6 @@ type ScheduleWorkflow struct {
 	// This is the *workflow's* search attributes. The schedule has its own, at
 	// spec.searchAttributes.
 	// +optional
-	// +kubebuilder:validation:MaxItems=32
 	SearchAttributes []ScheduleSearchAttribute `json:"searchAttributes,omitempty"`
 
 	// timeouts bound each run. Omitted fields take the namespace's defaults.
@@ -673,6 +790,15 @@ func (p *SchedulePolicies) OverlapValue() ScheduleOverlapPolicy {
 // pause a schedule from the UI, and pauseOnFailure pauses it without anyone
 // asking. So each field here is managed only when it is present, and left alone
 // otherwise.
+//
+// Only one field qualifies. Temporal's remaining-action count is deliberately
+// absent, and should not be added: it is a counter the Service consumes, ticking
+// 10, 9, 8 as the schedule acts. Reconciling it would mean writing 10 back every
+// time the operator looked, so a schedule asked to run ten times would run for
+// ever. Pausing is different - it is a state, not a budget, and it stays where
+// it is put until somebody moves it, which is exactly what reconciliation is
+// for. The counter is still preserved on every update; it is just not something
+// this API lets you declare.
 type ScheduleStateSpec struct {
 	// paused decides whether the schedule is paused.
 	//
@@ -686,21 +812,6 @@ type ScheduleStateSpec struct {
 	// operator's back is put back.
 	// +optional
 	Paused *bool `json:"paused,omitempty"`
-
-	// limitedActions caps how many more times the schedule will act.
-	//
-	// Temporal decrements this after each action and stops acting at zero;
-	// actions skipped by the overlap policy do not count. A schedule with no
-	// remaining actions is deleted by Temporal after a few days.
-	//
-	// **This is a counter Temporal owns.** Declaring it means the operator will
-	// keep putting the declared number back as Temporal counts it down, which is
-	// almost never what anyone wants. It is here because a schedule that should
-	// run a fixed number of times cannot be expressed otherwise; leave it out
-	// unless that is what you mean.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	LimitedActions *int64 `json:"limitedActions,omitempty"`
 }
 
 // ScheduleSpec defines the desired state of Schedule
@@ -791,7 +902,6 @@ type ScheduleSpec struct {
 	// This is the *schedule's* search attributes, not the workflow's - those are
 	// at spec.action.workflow.searchAttributes.
 	// +optional
-	// +kubebuilder:validation:MaxItems=32
 	SearchAttributes []ScheduleSearchAttribute `json:"searchAttributes,omitempty"`
 
 	// deletionPolicy decides what happens to the Temporal schedule when this

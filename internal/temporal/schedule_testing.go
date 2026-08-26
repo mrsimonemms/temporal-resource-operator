@@ -67,6 +67,12 @@ type FakeScheduleOptions struct {
 	Paused bool
 	Notes  string
 
+	// RemainingActions and LimitedActions are Temporal's own counter. Nothing
+	// can declare them, so a fake sets them directly - and a test that changes
+	// them between describes reproduces the Service consuming an action.
+	RemainingActions int64
+	LimitedActions   bool
+
 	// ConflictToken is the token a later update has to send back.
 	ConflictToken []byte
 }
@@ -115,6 +121,8 @@ func NewFakeSchedule(opts *FakeScheduleOptions) *Schedule {
 
 	schedule.State.Paused = opts.Paused
 	schedule.State.Notes = opts.Notes
+	schedule.State.RemainingActions = opts.RemainingActions
+	schedule.State.LimitedActions = opts.LimitedActions
 
 	memo, _ := buildMemo(desired.Memo)
 	searchAttributes, _ := buildSearchAttributes(desired.SearchAttributes)

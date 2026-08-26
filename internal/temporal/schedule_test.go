@@ -467,16 +467,14 @@ var _ = Describe("Schedule operations", func() {
 			Expect(state.GetNotes()).To(Equal(notes))
 		})
 
-		It("should turn a limited action count into Temporal's two fields", func() {
-			limited := int64(5)
+		It("should say nothing about remaining actions", func() {
+			// There is no way to ask for a remaining-action count, because it is
+			// a counter the Service consumes rather than a state anybody sets.
+			// A create therefore leaves Temporal's own defaults in place.
+			state := captureCreate(minimalDesired()).GetSchedule().GetState()
 
-			desired := minimalDesired()
-			desired.State = ScheduleStateSpec{LimitedActions: &limited}
-
-			state := captureCreate(desired).GetSchedule().GetState()
-
-			Expect(state.GetLimitedActions()).To(BeTrue())
-			Expect(state.GetRemainingActions()).To(BeNumerically("==", 5))
+			Expect(state.GetLimitedActions()).To(BeFalse())
+			Expect(state.GetRemainingActions()).To(BeZero())
 		})
 
 		It("should report a schedule that already exists", func() {
@@ -630,13 +628,57 @@ var _ = Describe("Schedule operations", func() {
 				Expect(state.GetNotes()).To(Equal("paused by a human"))
 			})
 
-			It("should keep the remaining action count when the spec does not declare it", func() {
-				// Temporal counts this down itself. Putting the original number
-				// back on every reconcile would make the limit meaningless.
+			It("should keep the remaining action count exactly as it found it", func() {
+				// Temporal counts this down as the schedule acts, and an update
+				// replaces the state wholesale - so a value this code did not
+				// copy across would be reset to zero. Nothing can ask for it, so
+				// preserving it is the only behaviour there is.
 				state := captureUpdate(existing(), minimalDesired()).GetSchedule().GetState()
 
 				Expect(state.GetLimitedActions()).To(BeTrue())
 				Expect(state.GetRemainingActions()).To(BeNumerically("==", 3))
+			})
+
+			It("should keep it while changing the timing, action, policies and pause", func() {
+				// The counter has to survive a change to everything else at
+				// once, because that is what a real reconcile does.
+				paused := true
+				window := time.Hour
+				notes := "managed by the operator"
+
+				desired := minimalDesired()
+				desired.Timing = ScheduleTiming{Cron: []string{"@hourly"}}
+				desired.Workflow.Type = "SomethingElse"
+				desired.Workflow.TaskQueue = "another-queue"
+				desired.Policies = SchedulePolicies{
+					Overlap:        ScheduleOverlapPolicyAllowAll,
+					CatchupWindow:  &window,
+					PauseOnFailure: true,
+				}
+				desired.State = ScheduleStateSpec{Paused: &paused, Notes: &notes}
+
+				schedule := captureUpdate(existing(), desired).GetSchedule()
+
+				Expect(schedule.GetState().GetLimitedActions()).To(BeTrue())
+				Expect(schedule.GetState().GetRemainingActions()).To(BeNumerically("==", 3))
+
+				// And everything that was asked for did change.
+				Expect(schedule.GetState().GetPaused()).To(BeTrue())
+				Expect(schedule.GetSpec().GetCronString()).To(Equal([]string{"@hourly"}))
+				Expect(schedule.GetAction().GetStartWorkflow().GetWorkflowType().GetName()).
+					To(Equal("SomethingElse"))
+			})
+
+			It("should keep a count the Service has already decremented", func() {
+				// The situation that made this a runtime value rather than
+				// desired state: Temporal has ticked 3 down to 1 since the
+				// operator last looked, and the operator must not put 3 back.
+				actual := existing()
+				actual.schedule.State.RemainingActions = 1
+
+				state := captureUpdate(actual, minimalDesired()).GetSchedule().GetState()
+
+				Expect(state.GetRemainingActions()).To(BeNumerically("==", 1))
 			})
 
 			It("should keep a catch-up window the spec does not declare", func() {
@@ -929,15 +971,24 @@ var _ = Describe("Schedule operations", func() {
 			Expect(drift).To(ConsistOf("memo"))
 		})
 
-		It("should notice a declared remaining action count differing", func() {
-			limited := int64(5)
+		It("should ignore Temporal decrementing the remaining action count", func() {
+			// Nothing declares it, so nothing can drift. Were this reported as
+			// drift the operator would write on every reconcile, and each write
+			// would put the counter back - a schedule asked to run ten times
+			// would run for ever.
+			actual := matching()
+			actual.schedule.State.LimitedActions = true
+			actual.schedule.State.RemainingActions = 7
 
-			desired := minimalDesired()
-			desired.State = ScheduleStateSpec{LimitedActions: &limited}
-
-			drift, err := matching().ScheduleDrift(desired)
+			drift, err := actual.ScheduleDrift(minimalDesired())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(drift).To(ConsistOf("state.limitedActions"))
+			Expect(drift).To(BeEmpty())
+
+			actual.schedule.State.RemainingActions = 6
+
+			drift, err = actual.ScheduleDrift(minimalDesired())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(drift).To(BeEmpty())
 		})
 
 		It("should list every managed field that differs", func() {

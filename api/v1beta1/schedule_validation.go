@@ -219,25 +219,17 @@ func (i *ScheduleInterval) validate() error {
 // the one thing CEL cannot see: that a step is useless without a range to step
 // through.
 func (c *ScheduleCalendar) validate() error {
-	fields := []struct {
-		name     string
-		ranges   []ScheduleRange
-		min, max int32
-	}{
-		{"second", c.Second, 0, 59},
-		{"minute", c.Minute, 0, 59},
-		{"hour", c.Hour, 0, 23},
-		{"dayOfMonth", c.DayOfMonth, 1, 31},
-		{"month", c.Month, 1, 12},
-		{"year", c.Year, MinCalendarYear, MaxCalendarYear},
-		{"dayOfWeek", c.DayOfWeek, 0, 6},
-	}
-
-	for _, field := range fields {
-		for i, r := range field.ranges {
-			if err := r.validate(field.min, field.max); err != nil {
-				return fmt.Errorf("%s[%d]: %w", field.name, i, err)
-			}
+	for _, check := range []func() error{
+		func() error { return validateCalendarRanges("second", c.Second, 0, 59) },
+		func() error { return validateCalendarRanges("minute", c.Minute, 0, 59) },
+		func() error { return validateCalendarRanges("hour", c.Hour, 0, 23) },
+		func() error { return validateCalendarRanges("dayOfMonth", c.DayOfMonth, 1, 31) },
+		func() error { return validateCalendarRanges("month", c.Month, 1, 12) },
+		func() error { return validateCalendarRanges("year", c.Year, MinCalendarYear, MaxCalendarYear) },
+		func() error { return validateCalendarRanges("dayOfWeek", c.DayOfWeek, 0, 6) },
+	} {
+		if err := check(); err != nil {
+			return err
 		}
 	}
 
@@ -248,19 +240,30 @@ func (c *ScheduleCalendar) validate() error {
 	return nil
 }
 
-// validate checks one range against the bounds of the field holding it.
-func (r ScheduleRange) validate(minVal, maxVal int32) error {
-	if r.Start < minVal || r.Start > maxVal {
-		return fmt.Errorf("start %d is not between %d and %d", r.Start, minVal, maxVal)
-	}
+// validateCalendarRanges checks one calendar field's ranges.
+//
+// The start and end bounds are also in the schema, as each range type's own
+// minimum and maximum, so they are repeated here only for an object stored
+// before the type existed or written past admission. What is *not* in the schema
+// is that an end must not come before its start: comparing two fields of the
+// same object needs CEL, and a CEL rule inside these lists would make Kubernetes
+// refuse the CRD unless the lists were capped - which Temporal does not cap. So
+// that check lives here alone.
+func validateCalendarRanges[T ScheduleCalendarRange](field string, ranges []T, minVal, maxVal int32) error {
+	for i, r := range ranges {
+		start := r.StartValue()
+		if start < minVal || start > maxVal {
+			return fmt.Errorf("%s[%d]: start %d is not between %d and %d", field, i, start, minVal, maxVal)
+		}
 
-	end := r.EndValue()
-	if end < r.Start || end > maxVal {
-		return fmt.Errorf("end %d is not between start %d and %d", end, r.Start, maxVal)
-	}
+		end := r.EndValue()
+		if end < start || end > maxVal {
+			return fmt.Errorf("%s[%d]: end %d is not between start %d and %d", field, i, end, start, maxVal)
+		}
 
-	if step := r.StepValue(); step < 1 {
-		return fmt.Errorf("step %d is not at least 1", step)
+		if step := r.StepValue(); step < 1 {
+			return fmt.Errorf("%s[%d]: step %d is not at least 1", field, i, step)
+		}
 	}
 
 	return nil

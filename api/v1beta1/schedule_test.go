@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -127,15 +128,25 @@ var _ = Describe("Schedule", func() {
 		)
 	})
 
-	Describe("ScheduleRange defaults", func() {
+	Describe("calendar range defaults", func() {
 		It("should read an absent end as the start", func() {
-			Expect(ScheduleRange{Start: 5}.EndValue()).To(BeNumerically("==", 5))
-			Expect(ScheduleRange{Start: 5, End: new(int32(9))}.EndValue()).To(BeNumerically("==", 9))
+			Expect(ScheduleRange0To59{Start: 5}.EndValue()).To(BeNumerically("==", 5))
+			Expect(ScheduleRange0To59{Start: 5, End: new(int32(9))}.EndValue()).To(BeNumerically("==", 9))
 		})
 
 		It("should read an absent step as one", func() {
-			Expect(ScheduleRange{Start: 5}.StepValue()).To(BeNumerically("==", 1))
-			Expect(ScheduleRange{Start: 5, Step: new(int32(3))}.StepValue()).To(BeNumerically("==", 3))
+			Expect(ScheduleRange0To59{Start: 5}.StepValue()).To(BeNumerically("==", 1))
+			Expect(ScheduleRange0To59{Start: 5, Step: new(int32(3))}.StepValue()).To(BeNumerically("==", 3))
+		})
+
+		It("should behave the same whichever field's range it is", func() {
+			// Six types, one behaviour. They differ only in the bounds the
+			// schema puts on them.
+			Expect(ScheduleRange0To23{Start: 9}.EndValue()).To(BeNumerically("==", 9))
+			Expect(ScheduleRange1To31{Start: 9}.StepValue()).To(BeNumerically("==", 1))
+			Expect(ScheduleRange1To12{Start: 3}.StartValue()).To(BeNumerically("==", 3))
+			Expect(ScheduleRange0To6{Start: 1, End: new(int32(5))}.EndValue()).To(BeNumerically("==", 5))
+			Expect(ScheduleRange2000To2100{Start: 2026}.EndValue()).To(BeNumerically("==", 2026))
 		})
 	})
 
@@ -171,7 +182,7 @@ var _ = Describe("Schedule", func() {
 				Intervals: []ScheduleInterval{{Every: *duration("6h")}},
 			}),
 			Entry("calendars alone", ScheduleTiming{
-				Calendars: []ScheduleCalendar{{Hour: []ScheduleRange{{Start: 9}}}},
+				Calendars: []ScheduleCalendar{{Hour: []ScheduleRange0To23{{Start: 9}}}},
 			}),
 			Entry("cron and intervals", ScheduleTiming{
 				Cron:      []string{"30 2 * * *"},
@@ -180,10 +191,96 @@ var _ = Describe("Schedule", func() {
 			Entry("all three, with exclusions", ScheduleTiming{
 				Cron:             []string{"@daily"},
 				Intervals:        []ScheduleInterval{{Every: *duration("6h"), Offset: duration("5h")}},
-				Calendars:        []ScheduleCalendar{{Hour: []ScheduleRange{{Start: 9}}}},
-				ExcludeCalendars: []ScheduleCalendar{{DayOfMonth: []ScheduleRange{{Start: 1}}}},
+				Calendars:        []ScheduleCalendar{{Hour: []ScheduleRange0To23{{Start: 9}}}},
+				ExcludeCalendars: []ScheduleCalendar{{DayOfMonth: []ScheduleRange1To31{{Start: 1}}}},
 			}),
 		)
+
+		Describe("collections Temporal does not limit", func() {
+			// The operator used to cap these at fifty, which was its own
+			// invention: the pinned Service imposes no count limit on
+			// calendars, intervals or cron strings. Fifty-one is one past the
+			// cap that used to be here, and Go validation has to accept it just
+			// as the API server does.
+			const beyondTheOldCap = 51
+
+			It("should accept fifty-one calendars", func() {
+				calendars := make([]ScheduleCalendar, beyondTheOldCap)
+				for i := range calendars {
+					calendars[i] = ScheduleCalendar{
+						Minute: []ScheduleRange0To59{{Start: int32(i % 60)}},
+					}
+				}
+
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{Calendars: calendars}
+
+				Expect(spec.Validate()).To(Succeed())
+			})
+
+			It("should accept fifty-one intervals", func() {
+				intervals := make([]ScheduleInterval, beyondTheOldCap)
+				for i := range intervals {
+					intervals[i] = ScheduleInterval{
+						Every: Duration{Duration: time.Duration(i+1) * time.Minute},
+					}
+				}
+
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{Intervals: intervals}
+
+				Expect(spec.Validate()).To(Succeed())
+			})
+
+			It("should accept fifty-one cron expressions", func() {
+				cron := make([]string, beyondTheOldCap)
+				for i := range cron {
+					cron[i] = fmt.Sprintf("%d 2 * * *", i)
+				}
+
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{Cron: cron}
+
+				Expect(spec.Validate()).To(Succeed())
+			})
+
+			It("should still refuse one bad entry among fifty-one", func() {
+				// Removing the count limit removed nothing else.
+				cron := make([]string, beyondTheOldCap)
+				for i := range cron {
+					cron[i] = fmt.Sprintf("%d 2 * * *", i)
+				}
+
+				cron[beyondTheOldCap-1] = "not a cron expression"
+
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{Cron: cron}
+
+				Expect(spec.Validate()).To(MatchError(ErrInvalidCron))
+			})
+
+			It("should still insist on at least one rule", func() {
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{}
+
+				Expect(spec.Validate()).To(MatchError(ErrNoScheduleRule))
+			})
+
+			It("should accept more ranges in a field than the field has values", func() {
+				// Temporal accepts redundant ranges, so this does too. Sixty-one
+				// second ranges say nothing sixty could not, but saying it is not
+				// an error.
+				seconds := make([]ScheduleRange0To59, 61)
+				for i := range seconds {
+					seconds[i] = ScheduleRange0To59{Start: int32(i % 60)}
+				}
+
+				spec := validScheduleSpec()
+				spec.Schedule = ScheduleTiming{Calendars: []ScheduleCalendar{{Second: seconds}}}
+
+				Expect(spec.Validate()).To(Succeed())
+			})
+		})
 
 		Describe("intervals", func() {
 			// The bounds are the Service's validateInterval, checked here
@@ -321,46 +418,46 @@ var _ = Describe("Schedule", func() {
 					Expect(spec.Validate()).To(HaveOccurred())
 				},
 				Entry("second at the bounds",
-					ScheduleCalendar{Second: []ScheduleRange{{Start: 0, End: new(int32(59))}}}, true),
+					ScheduleCalendar{Second: []ScheduleRange0To59{{Start: 0, End: new(int32(59))}}}, true),
 				Entry("second past the bound",
-					ScheduleCalendar{Second: []ScheduleRange{{Start: 60}}}, false),
+					ScheduleCalendar{Second: []ScheduleRange0To59{{Start: 60}}}, false),
 				Entry("hour at the bound",
-					ScheduleCalendar{Hour: []ScheduleRange{{Start: 23}}}, true),
+					ScheduleCalendar{Hour: []ScheduleRange0To23{{Start: 23}}}, true),
 				Entry("hour past the bound",
-					ScheduleCalendar{Hour: []ScheduleRange{{Start: 24}}}, false),
+					ScheduleCalendar{Hour: []ScheduleRange0To23{{Start: 24}}}, false),
 				Entry("dayOfMonth starts at one",
-					ScheduleCalendar{DayOfMonth: []ScheduleRange{{Start: 1}}}, true),
+					ScheduleCalendar{DayOfMonth: []ScheduleRange1To31{{Start: 1}}}, true),
 				Entry("dayOfMonth zero",
-					ScheduleCalendar{DayOfMonth: []ScheduleRange{{Start: 0}}}, false),
+					ScheduleCalendar{DayOfMonth: []ScheduleRange1To31{{Start: 0}}}, false),
 				Entry("month at the bound",
-					ScheduleCalendar{Month: []ScheduleRange{{Start: 12}}}, true),
+					ScheduleCalendar{Month: []ScheduleRange1To12{{Start: 12}}}, true),
 				Entry("month past the bound",
-					ScheduleCalendar{Month: []ScheduleRange{{Start: 13}}}, false),
+					ScheduleCalendar{Month: []ScheduleRange1To12{{Start: 13}}}, false),
 				// Sunday is 0, from Go's time.Weekday, which is what the Service
 				// matches against.
-				Entry("dayOfWeek Sunday", ScheduleCalendar{DayOfWeek: []ScheduleRange{{Start: 0}}}, true),
-				Entry("dayOfWeek Saturday", ScheduleCalendar{DayOfWeek: []ScheduleRange{{Start: 6}}}, true),
+				Entry("dayOfWeek Sunday", ScheduleCalendar{DayOfWeek: []ScheduleRange0To6{{Start: 0}}}, true),
+				Entry("dayOfWeek Saturday", ScheduleCalendar{DayOfWeek: []ScheduleRange0To6{{Start: 6}}}, true),
 				Entry("dayOfWeek seven",
-					ScheduleCalendar{DayOfWeek: []ScheduleRange{{Start: 7}}}, false),
+					ScheduleCalendar{DayOfWeek: []ScheduleRange0To6{{Start: 7}}}, false),
 				Entry("year at the bounds",
-					ScheduleCalendar{Year: []ScheduleRange{{Start: 2000, End: new(int32(2100))}}}, true),
+					ScheduleCalendar{Year: []ScheduleRange2000To2100{{Start: 2000, End: new(int32(2100))}}}, true),
 				Entry("year before the bound",
-					ScheduleCalendar{Year: []ScheduleRange{{Start: 1999}}}, false),
+					ScheduleCalendar{Year: []ScheduleRange2000To2100{{Start: 1999}}}, false),
 				Entry("year past the bound",
-					ScheduleCalendar{Year: []ScheduleRange{{Start: 2101}}}, false),
+					ScheduleCalendar{Year: []ScheduleRange2000To2100{{Start: 2101}}}, false),
 				Entry("end before start",
-					ScheduleCalendar{Hour: []ScheduleRange{{Start: 9, End: new(int32(3))}}}, false),
+					ScheduleCalendar{Hour: []ScheduleRange0To23{{Start: 9, End: new(int32(3))}}}, false),
 				Entry("step of one",
-					ScheduleCalendar{Hour: []ScheduleRange{{Start: 0, End: new(int32(23)), Step: new(int32(1))}}},
+					ScheduleCalendar{Hour: []ScheduleRange0To23{{Start: 0, End: new(int32(23)), Step: new(int32(1))}}},
 					true),
 				Entry("step of zero",
-					ScheduleCalendar{Hour: []ScheduleRange{{Start: 0, Step: new(int32(0))}}}, false),
+					ScheduleCalendar{Hour: []ScheduleRange0To23{{Start: 0, Step: new(int32(0))}}}, false),
 			)
 
 			It("should refuse a comment past Temporal's length limit", func() {
 				spec := validScheduleSpec()
 				spec.Schedule = ScheduleTiming{Calendars: []ScheduleCalendar{
-					{Hour: []ScheduleRange{{Start: 9}}, Comment: string(make([]byte, 201))},
+					{Hour: []ScheduleRange0To23{{Start: 9}}, Comment: string(make([]byte, 201))},
 				}}
 
 				Expect(spec.Validate()).To(MatchError(ContainSubstring("comment")))
@@ -368,7 +465,7 @@ var _ = Describe("Schedule", func() {
 
 			It("should check exclusions the same way", func() {
 				spec := validScheduleSpec()
-				spec.Schedule.ExcludeCalendars = []ScheduleCalendar{{Hour: []ScheduleRange{{Start: 24}}}}
+				spec.Schedule.ExcludeCalendars = []ScheduleCalendar{{Hour: []ScheduleRange0To23{{Start: 24}}}}
 
 				Expect(spec.Validate()).To(MatchError(ContainSubstring("excludeCalendars")))
 			})

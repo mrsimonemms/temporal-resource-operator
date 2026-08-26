@@ -132,7 +132,7 @@ func desiredCalendar(calendar *temporalv1beta1.ScheduleCalendar) temporal.Schedu
 // stable: a range written as "start alone" and one written with an explicit
 // equal end are the same schedule, and hashing them the same way means editing
 // the YAML into the other form is not read as drift.
-func desiredRanges(ranges []temporalv1beta1.ScheduleRange) []temporal.ScheduleRange {
+func desiredRanges[T temporalv1beta1.ScheduleCalendarRange](ranges []T) []temporal.ScheduleRange {
 	if len(ranges) == 0 {
 		return nil
 	}
@@ -140,7 +140,7 @@ func desiredRanges(ranges []temporalv1beta1.ScheduleRange) []temporal.ScheduleRa
 	desired := make([]temporal.ScheduleRange, 0, len(ranges))
 	for _, r := range ranges {
 		desired = append(desired, temporal.ScheduleRange{
-			Start: r.Start,
+			Start: r.StartValue(),
 			End:   r.EndValue(),
 			Step:  r.StepValue(),
 		})
@@ -221,7 +221,6 @@ func desiredState(state *temporalv1beta1.ScheduleStateSpec, notes *string) tempo
 	}
 
 	desired.Paused = state.Paused
-	desired.LimitedActions = state.LimitedActions
 
 	return desired
 }

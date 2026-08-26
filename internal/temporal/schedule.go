@@ -261,10 +261,15 @@ type SchedulePolicies struct {
 // Every field is a pointer because state is operational: a person can pause a
 // schedule, and Temporal pauses one itself when pause-on-failure fires. A nil
 // field is left exactly as the Service has it.
+//
+// The remaining-action count is deliberately not here. It is a counter the
+// Service consumes rather than a state anybody sets, so there is nothing
+// sensible for a caller to declare: writing a number back would undo the
+// counting. It is still carried across every update untouched - see
+// buildScheduleState - and can be read with Schedule.RemainingActions.
 type ScheduleStateSpec struct {
-	Paused         *bool
-	LimitedActions *int64
-	Notes          *string
+	Paused *bool
+	Notes  *string
 }
 
 // ScheduleDesired is the schedule a caller wants, holding only the parts the
@@ -322,6 +327,11 @@ func (s *Schedule) Notes() string {
 
 // RemainingActions returns how many more times the Service will act, and whether
 // it is counting at all.
+//
+// This is a read of Temporal's runtime state and nothing more. The operator does
+// not manage it: the count is consumed as the schedule acts, so there is no
+// stable value to reconcile towards. It is exposed so that a caller can report
+// what the Service says, and so that a test can prove an update left it alone.
 func (s *Schedule) RemainingActions() (remaining int64, limited bool) {
 	state := s.schedule.GetState()
 
@@ -568,11 +578,6 @@ func (s *Schedule) stateDrift(desired *ScheduleStateSpec) []string {
 
 	if desired.Paused != nil && state.GetPaused() != *desired.Paused {
 		drift = append(drift, "state.paused")
-	}
-
-	if desired.LimitedActions != nil &&
-		(!state.GetLimitedActions() || state.GetRemainingActions() != *desired.LimitedActions) {
-		drift = append(drift, "state.limitedActions")
 	}
 
 	if desired.Notes != nil && state.GetNotes() != *desired.Notes {
@@ -865,11 +870,11 @@ func buildScheduleState(
 		built.Notes = *state.Notes
 	}
 
-	if state.LimitedActions != nil {
-		built.LimitedActions = true
-		built.RemainingActions = *state.LimitedActions
-	}
-
+	// LimitedActions and RemainingActions are deliberately never assigned. They
+	// came off the clone of what the Service holds and stay exactly as they
+	// were, which is the whole reason this builds from the Service's own message
+	// rather than an empty one: an update replaces the state wholesale, so a
+	// counter this function did not copy across would be reset to zero.
 	return built
 }
 

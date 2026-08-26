@@ -61,7 +61,7 @@ A Kubernetes operator for declaratively managing resources in an existing
     * [The workflow action](#the-workflow-action)
       * [Input, memo and Search Attributes](#input-memo-and-search-attributes)
     * [Policies](#policies)
-    * [State: paused and remaining actions](#state-paused-and-remaining-actions)
+    * [State: pausing](#state-pausing)
     * [Drift, and why Temporal makes it awkward](#drift-and-why-temporal-makes-it-awkward)
     * [Unmanaged fields are preserved](#unmanaged-fields-are-preserved)
     * [Adopting an existing Schedule](#adopting-an-existing-schedule)
@@ -1116,7 +1116,7 @@ all. This is the same split `SearchAttribute` and `NexusEndpoint` use.
 | `spec.schedule` | object | yes | — | yes | When the schedule acts. See [Timing](#timing). |
 | `spec.action.workflow` | object | yes | — | yes | What it does. See [The workflow action](#the-workflow-action). |
 | `spec.policies` | object | no | — | yes | See [Policies](#policies). `catchupWindow` is unmanaged when omitted. |
-| `spec.state` | object | no | — | yes | See [State](#state-paused-and-remaining-actions). |
+| `spec.state` | object | no | — | yes | Pausing. See [State](#state-pausing). |
 | `spec.notes` | string | no | unmanaged | yes | A human-readable note on the schedule. |
 | `spec.memo` | map | no | unmanaged | yes | Non-indexed metadata on the *schedule*. Values are JSON. |
 | `spec.searchAttributes` | list | no | unmanaged | yes | Indexed metadata on the *schedule*. |
@@ -1391,7 +1391,7 @@ ten seconds by the Service, so this API refuses it instead.
 after its retry policy is exhausted. With `overlap: AllowAll` the pause may not
 stop the next action, because that one may already have started.
 
-#### State: paused and remaining actions
+#### State: pausing
 
 Temporal treats a schedule's state as **operational** rather than declarative: a
 person can pause a schedule from the UI, and `pauseOnFailure` pauses one without
@@ -1419,18 +1419,22 @@ spec:
     paused: false
 ```
 
-`state.limitedActions` caps how many more times the schedule will act. **This is
-a counter Temporal owns**: it decrements after each action and stops acting at
-zero, and a schedule with no remaining actions is deleted by Temporal after a
-few days. Declaring it means the operator keeps putting the declared number back
-as Temporal counts it down, which is almost never what anyone wants. It is there
-because a schedule that should run a fixed number of times cannot be expressed
-otherwise; leave it out unless that is what you mean.
+**Pausing is the only state you can declare.** Temporal's remaining-actions count
+is runtime state consumed as Schedule actions execute — the Service ticks it down
+from 10 to 9 to 8 as the schedule acts — so the operator deliberately does not
+manage it as desired state. Reconciling it would write the declared number back
+every time the operator looked, and a schedule asked to run ten times would run
+for ever. The count is preserved untouched on every update; it is simply not
+something this API lets you set. Use `temporal schedule update` if you need to
+change it.
 
-`spec.notes` is the same shape of decision. Temporal **overwrites** the note
-itself — pausing a schedule from the UI or through `pauseOnFailure` replaces it
-with the Service's own explanation — so declaring a note means the operator will
-put yours back, erasing why the schedule paused.
+Pausing is different, and that is why it is here: it is a state rather than a
+budget, and it stays where it is put until somebody moves it.
+
+`spec.notes` is the same shape of decision as pausing. Temporal **overwrites**
+the note itself — pausing a schedule from the UI or through `pauseOnFailure`
+replaces it with the Service's own explanation — so declaring a note means the
+operator will put yours back, erasing why the schedule paused.
 
 #### Drift, and why Temporal makes it awkward
 
@@ -1527,9 +1531,16 @@ Temporal would accept is worse than not checking at all.
 | Fairness key | 64 bytes | the `Priority` protobuf |
 | Fairness weight | 0.001–1000 | the `Priority` protobuf |
 
-`spec.schedule`'s collections are capped at 50 entries each. That one is
-**ours**, not Temporal's: the pinned Service imposes no count limit, and the cap
-exists only so a `Schedule` cannot grow without bound in etcd.
+**Nothing on a `Schedule` is capped by count.** Temporal imposes no limit on how
+many calendars, intervals or cron expressions a schedule may have, so neither
+does this: if Temporal accepts the collection, so does the operator.
+
+That is also why each calendar field's bounds are plain `minimum` and `maximum`
+on the field rather than a CEL rule. Kubernetes refuses a CRD whose CEL rules
+could run over an unbounded list, so a rule there would have forced an arbitrary
+cap on how many calendars a schedule may have. The one rule that genuinely needs
+CEL — that a range's `end` is not before its `start` — is checked by the operator
+instead, and reported as `InvalidSchedule`.
 
 #### Schedule limitations
 
