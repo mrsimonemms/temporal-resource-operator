@@ -21,7 +21,7 @@ A Kubernetes operator for declaratively managing resources in an existing
 * [Quick start](#quick-start)
   * [1. Describe the Temporal Service](#1-describe-the-temporal-service)
   * [2. Create a Temporal Namespace](#2-create-a-temporal-namespace)
-  * [3. Add a Search Attribute and a Nexus Endpoint](#3-add-a-search-attribute-and-a-nexus-endpoint)
+  * [3. Add a Search Attribute, a Nexus Endpoint and a Schedule](#3-add-a-search-attribute-a-nexus-endpoint-and-a-schedule)
   * [4. Confirm from Temporal](#4-confirm-from-temporal)
 * [Resource reference](#resource-reference)
   * [Connection](#connection)
@@ -53,6 +53,21 @@ A Kubernetes operator for declaratively managing resources in an existing
     * [Adoption](#adoption)
     * [Namespace deletion is blocked by endpoints](#namespace-deletion-is-blocked-by-endpoints)
     * [NexusEndpoint limitations](#nexusendpoint-limitations)
+  * [Schedule](#schedule)
+    * [Two names again](#two-names-again)
+    * [Schedule fields](#schedule-fields)
+    * [Timing](#timing)
+      * [Time zone, jitter, start and end](#time-zone-jitter-start-and-end)
+    * [The workflow action](#the-workflow-action)
+      * [Input, memo and Search Attributes](#input-memo-and-search-attributes)
+    * [Policies](#policies)
+    * [State: pausing](#state-pausing)
+    * [Drift, and why Temporal makes it awkward](#drift-and-why-temporal-makes-it-awkward)
+    * [Unmanaged fields are preserved](#unmanaged-fields-are-preserved)
+    * [Adopting an existing Schedule](#adopting-an-existing-schedule)
+    * [Validation](#validation)
+    * [Limits mirrored from Temporal](#limits-mirrored-from-temporal)
+    * [Schedule limitations](#schedule-limitations)
 * [Ownership and adoption](#ownership-and-adoption)
 * [Deletion policy](#deletion-policy)
 * [Dependency model](#dependency-model)
@@ -73,10 +88,10 @@ A Kubernetes operator for declaratively managing resources in an existing
 
 ## What it does
 
-Temporal Namespaces, Search Attributes and Nexus Endpoints are normally created
-by hand with `temporal` CLI commands, or by a bootstrap script that nobody
-wants to own. This operator lets you describe them as Kubernetes resources and
-keeps the Temporal Service in step with what you declared.
+Temporal Namespaces, Search Attributes, Nexus Endpoints and Schedules are
+normally created by hand with `temporal` CLI commands, or by a bootstrap script
+that nobody wants to own. This operator lets you describe them as Kubernetes
+resources and keeps the Temporal Service in step with what you declared.
 
 ```text
 Kubernetes CRs
@@ -113,7 +128,7 @@ including their persistence, services, upgrades and supporting infrastructure.
 `temporal-resource-operator` starts one level higher: it assumes the Temporal
 Service already exists — whether that is Temporal Cloud or a self-hosted
 cluster — and manages resources inside it, such as Namespaces, Search
-Attributes and Nexus Endpoints.
+Attributes, Nexus Endpoints and Schedules.
 
 There is some overlap around Namespace management, but the two projects solve
 different problems and can be complementary: one can operate the Temporal
@@ -131,6 +146,7 @@ Kubernetes namespace.
 | `Namespace` | `tns` | Manages one Temporal Namespace |
 | `SearchAttribute` | `tsa` | Manages one custom Search Attribute |
 | `NexusEndpoint` | `tnx` | Manages one Nexus Endpoint |
+| `Schedule` | `tsc` | Manages one Temporal Schedule |
 
 `Connection` deliberately has no short name; use `kubectl get connections`.
 
@@ -168,7 +184,7 @@ Charts are published from release tags only, so `<version>` is a released
 [chart version](https://github.com/mrsimonemms/temporal-resource-operator/pkgs/container/charts%2Ftemporal-resource-operator).
 
 The namespace is a convention rather than a requirement — the chart installs
-into whichever namespace you give it. It installs the four CRDs, the controller
+into whichever namespace you give it. It installs the five CRDs, the controller
 Deployment, its ServiceAccount and RBAC, and an HTTPS metrics Service. It does
 not install Temporal, and it creates no Temporal resources of its own.
 
@@ -194,7 +210,7 @@ cd temporal-resource-operator
 
 export IMG=ghcr.io/mrsimonemms/temporal-resource-operator:<tag>
 
-make install            # install the four CRDs
+make install            # install the five CRDs
 make deploy IMG=$IMG    # install RBAC and the controller manager
 ```
 
@@ -258,7 +274,7 @@ the finalizers by hand.
 
 ## Quick start
 
-This walks through all four resources and verifies the resulting objects in
+This walks through all five resources and verifies the resulting objects in
 Temporal. The names used here (`production`, `payments`) carry through the rest
 of this document.
 
@@ -330,7 +346,7 @@ NAME       CONNECTION   RETENTION   OWNERSHIP   READY   REASON     AGE
 payments   production   7d          Created     True    Created    5s
 ```
 
-### 3. Add a Search Attribute and a Nexus Endpoint
+### 3. Add a Search Attribute, a Nexus Endpoint and a Schedule
 
 ```yaml
 apiVersion: temporal.simonemms.com/v1beta1
@@ -356,11 +372,30 @@ spec:
   namespaceRef:
     name: payments
   taskQueue: payments-nexus
+---
+apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  name: nightly-payments
+spec:
+  scheduleId: PaymentsNightly
+  connectionRef:
+    name: production
+  namespaceRef:
+    name: payments
+  schedule:
+    cron:
+      - "30 2 * * *"
+  action:
+    workflow:
+      type: ReconcilePayments
+      taskQueue: payments
 ```
 
 ```sh
 kubectl get tsa
 kubectl get tnx
+kubectl get tsc
 ```
 
 ```text
@@ -369,6 +404,9 @@ customer-id   CustomerId   Keyword   payments      Created     True    Created  
 
 NAME             ENDPOINT        TEMPORAL NS   TASK QUEUE       OWNERSHIP   READY   REASON    AGE
 payments-nexus   PaymentsNexus   payments      payments-nexus   Created     True    Created   4s
+
+NAME               SCHEDULE ID       TEMPORAL NS   WORKFLOW            OWNERSHIP   READY   REASON    AGE
+nightly-payments   PaymentsNightly   payments      ReconcilePayments   Created     True    Created   4s
 ```
 
 ### 4. Confirm from Temporal
@@ -1014,6 +1052,510 @@ endpoint has actually gone.
 * **One resource per endpoint.** Two resources naming the same Service-wide
   endpoint are unsupported and will fight over it.
 
+### Schedule
+
+A `Schedule` manages one Temporal Schedule in one Temporal Namespace. A Schedule
+starts a Workflow Execution automatically, on a timetable you declare.
+
+```yaml
+apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  name: nightly-payments
+spec:
+  connectionRef:
+    name: production
+  namespaceRef:
+    name: payments
+
+  scheduleId: PaymentsNightly
+
+  schedule:
+    cron:
+      - "30 2 * * *"
+    timeZone: Europe/London
+    jitter: 5m
+
+  action:
+    workflow:
+      type: ReconcilePayments
+      taskQueue: payments
+      workflowId: payments-nightly
+      input:
+        - '{"mode":"nightly"}'
+      timeouts:
+        run: 1h
+
+  policies:
+    overlap: Skip
+    catchupWindow: 1h
+    pauseOnFailure: true
+
+  deletionPolicy: Delete
+```
+
+#### Two names again
+
+```text
+metadata.name = nightly-payments   the Kubernetes resource name
+spec.scheduleId = PaymentsNightly  the Temporal Schedule ID
+```
+
+Kubernetes only accepts lowercase names for a resource, and Temporal Schedule
+IDs are conventionally PascalCase. Nothing is derived from `metadata.name`:
+what you write in `spec.scheduleId` is what Temporal is asked for, casing and
+all. This is the same split `SearchAttribute` and `NexusEndpoint` use.
+
+#### Schedule fields
+
+| Field | Type | Required | Default | Mutable | Description |
+| --- | --- | --- | --- | --- | --- |
+| `spec.scheduleId` | string | yes | — | no | The Temporal Schedule ID. At most 977 characters. |
+| `spec.connectionRef.name` | string | yes | — | no | `Connection` in the same Kubernetes namespace. |
+| `spec.namespaceRef.name` | string | yes | — | no | `Namespace` in the same Kubernetes namespace. |
+| `spec.schedule` | object | yes | — | yes | When the schedule acts. See [Timing](#timing). |
+| `spec.action.workflow` | object | yes | — | yes | What it does. See [The workflow action](#the-workflow-action). |
+| `spec.policies` | object | no | — | yes | See [Policies](#policies). `catchupWindow` is unmanaged when omitted. |
+| `spec.state` | object | no | — | yes | Pausing. See [State](#state-pausing). |
+| `spec.notes` | string | no | unmanaged | yes | A human-readable note on the schedule. |
+| `spec.memo` | map | no | unmanaged | yes | Non-indexed metadata on the *schedule*. Values are JSON. |
+| `spec.searchAttributes` | list | no | unmanaged | yes | Indexed metadata on the *schedule*. |
+| `spec.deletionPolicy` | enum | no | `Delete` | yes | `Delete` or `Orphan`. |
+
+`scheduleId`, `connectionRef` and `namespaceRef` are immutable. Changing one
+would not move anything — it would point the resource at a different schedule
+and strand whatever it was looking after. Delete the resource and make a new one
+instead.
+
+#### Timing
+
+Temporal builds a schedule's times from the **union** of three kinds of rule,
+minus any exclusions. You can use any combination, and at least one rule is
+required or the schedule would never act.
+
+**Cron**, for migrating an existing cron workflow without rewriting its timing:
+
+```yaml
+spec:
+  schedule:
+    cron:
+      - "30 2 * * *"
+```
+
+Temporal accepts 5, 6 or 7 space-separated fields:
+
+```text
+5: minute hour dayOfMonth month dayOfWeek
+6: minute hour dayOfMonth month dayOfWeek year
+7: second minute hour dayOfMonth month dayOfWeek year
+```
+
+The shorthands `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
+`@midnight` and `@hourly` work, and so does `@every <interval>[/<phase>]`, which
+Temporal compiles into an interval rather than a calendar. A `CRON_TZ=<zone>` or
+`TZ=<zone>` prefix sets the time zone — leave `timeZone` empty if you use it — and
+a `#` comment may follow the expression. Month and day names work (`JAN`,
+`MON-FRI`), and day-of-week accepts `7` as another way of writing Sunday.
+
+Note that Temporal does **not** implement the special case some cron
+implementations have of treating `dayOfMonth` and `dayOfWeek` as "or" rather
+than "and" when both are set.
+
+**Intervals**, counted from the Unix epoch rather than from when you created the
+schedule:
+
+```yaml
+spec:
+  schedule:
+    intervals:
+      - every: 6h
+        offset: 5h
+```
+
+`every: 1h` matches every hour on the hour; adding `offset: 19m` matches every
+`xx:19:00`. Temporal requires `every` to be at least one second, and `offset` to
+be **shorter than** `every` — an offset of a whole period is the same as no
+offset, and the Service refuses the ambiguity.
+
+**Calendars**, which are cron written out in full and are far easier to read:
+
+```yaml
+spec:
+  schedule:
+    calendars:
+      - hour:
+          - start: 9
+        minute:
+          - start: 15
+        dayOfWeek:
+          - start: 1
+            end: 5
+        comment: Weekday mornings
+```
+
+Each field is a list of ranges, and a time matches when at least one range of
+every field matches it. A range is a `start`, an optional inclusive `end`
+(defaulting to `start`) and an optional `step` (defaulting to 1).
+
+**The defaults are what make a calendar readable**, and they are Temporal's:
+
+| Field | Range | Omitted means |
+| --- | --- | --- |
+| `second` | 0–59 | matches 0 |
+| `minute` | 0–59 | matches 0 |
+| `hour` | 0–23 | matches 0 |
+| `dayOfMonth` | 1–31 | matches every day |
+| `month` | 1–12 | matches every month |
+| `dayOfWeek` | 0–6, **0 is Sunday** | matches every day |
+| `year` | 2000–2100 | matches every year |
+
+So the calendar above fires at 09:15:00 on weekdays, not sixty times a minute.
+`dayOfWeek` counting Sunday as 0 is Temporal's numbering, taken from Go's
+`time.Weekday`; it is the easiest thing to get backwards, so the API server's
+rejection message says which way round it is.
+
+**Mixing them** is supported, because Temporal supports it. This runs every six
+hours *and* at 09:15 on weekdays, but never on the first of the month:
+
+```yaml
+spec:
+  schedule:
+    intervals:
+      - every: 6h
+    calendars:
+      - hour:
+          - start: 9
+        minute:
+          - start: 15
+        dayOfWeek:
+          - start: 1
+            end: 5
+    excludeCalendars:
+      - dayOfMonth:
+          - start: 1
+```
+
+Every field of an exclusion, seconds included, has to match a time for that time
+to be skipped.
+
+##### Time zone, jitter, start and end
+
+```yaml
+spec:
+  schedule:
+    timeZone: Europe/London
+    jitter: 5m
+    startAt: "2026-01-01T00:00:00Z"
+    endAt: "2026-12-31T23:59:59Z"
+```
+
+`timeZone` is an IANA name and defaults to UTC. **Calendar matching is literal,
+with no special handling of daylight saving**: a calendar firing at 02:30 in a
+zone that observes DST will not fire on the day that has no 02:30, and one
+firing at 01:30 will fire twice on the day that has two. Use UTC for a schedule
+that must be entirely self-contained. The zone is loaded by the Temporal Service
+from *its* environment, so a zone this operator can resolve is not automatically
+one the Service can.
+
+`jitter` spreads each action out by a random amount between zero and the value
+given, so that many schedules sharing a time do not all fire at once. Temporal
+caps the delay at the time until the next action, so jitter longer than the
+period between actions cannot push an action past its successor.
+
+`startAt` and `endAt` bound the whole schedule. `endAt` retires a schedule
+without deleting it, and has to be after `startAt`.
+
+#### The workflow action
+
+```yaml
+spec:
+  action:
+    workflow:
+      type: ReconcilePayments      # required
+      taskQueue: payments          # required
+      workflowId: payments-nightly # optional
+      input:
+        - '{"mode":"nightly"}'
+      memo:
+        owner: '"payments-team"'
+      searchAttributes:
+        - name: CustomerId
+          type: Keyword
+          value: '"acme"'
+      timeouts:
+        task: 10s
+        run: 1h
+        execution: 2h
+      priority:
+        key: 2
+        fairnessKey: tenant-acme
+        fairnessWeight: "9"
+      staticSummary: Nightly reconciliation
+      staticDetails: |
+        Runs after the overnight batch.
+```
+
+`workflowId` is optional — Temporal appends a timestamp to it so each run is
+distinct, and generates a UUID per run when it is left out. Naming it makes runs
+far easier to find in the UI.
+
+**The action is fully managed**, which is different from the schedule-level
+fields above. `spec.action.workflow` describes the workflow to start, so removing
+`input` or `memo` from it means starting the workflow *without* them — not
+leaving whatever was there. The preservation guarantee in
+[Unmanaged fields are preserved](#unmanaged-fields-are-preserved) is about
+fields this API does not model at all, such as a retry policy or a header; those
+survive untouched.
+
+`timeouts` are optional and take the namespace's defaults when omitted. A
+`priority.key` is 1 to 5, where smaller means sooner; `fairnessKey` is limited to
+64 **bytes**, not characters, and `fairnessWeight` is a decimal string between
+`"0.001"` and `"1000"`. Temporal clamps a weight outside that range rather than
+refusing it, so this API refuses it instead — a spec that does not describe what
+happens is worse than a rejected one.
+
+##### Input, memo and Search Attributes
+
+`input` is a list, **one entry per workflow argument**, each written as JSON:
+
+```yaml
+input:
+  - '{"mode":"nightly"}'   # first argument
+  - '42'                   # second argument
+```
+
+This is the declarative equivalent of `temporal workflow start --input`: each
+entry is encoded with Temporal's default data converter into a `json/plain`
+payload, so a worker written against any SDK deserialises them the way it always
+would. A workflow taking a single struct argument takes one entry.
+
+The CLI's file and base64 input forms are deliberately absent. A CRD is not a
+filesystem, and a payload that cannot be read in the spec cannot be reviewed in
+a pull request.
+
+`memo` values are JSON too, so a string value needs its quotes: `'"payments"'`,
+not `payments`.
+
+Search Attributes carry their type, because a value cannot be interpreted
+without one — `"7"` is an `Int` or a `Text` depending entirely on how the
+attribute was registered. The types are the same names a
+[`SearchAttribute`](#supported-types) uses, and the attribute has to be
+registered on the namespace first:
+
+| Type | Value written as |
+| --- | --- |
+| `Bool` | `'true'` |
+| `Int` | `'7'` |
+| `Double` | `'1.5'` |
+| `Keyword`, `Text` | `'"gold"'` |
+| `KeywordList` | `'["a","b"]'` |
+| `Datetime` | `'"2026-01-01T00:00:00Z"'` |
+
+**The schedule and the workflow have separate memos and Search Attributes.**
+`spec.memo` and `spec.searchAttributes` are attached to the schedule itself and
+show up when listing schedules; `spec.action.workflow.memo` and
+`spec.action.workflow.searchAttributes` are attached to each run the schedule
+starts. Both are unmanaged when omitted, and setting either to an empty value
+clears it.
+
+#### Policies
+
+```yaml
+spec:
+  policies:
+    overlap: Skip
+    catchupWindow: 1h
+    pauseOnFailure: true
+```
+
+`overlap` decides what happens when an action would start while an earlier one
+is still running. It defaults to `Skip`, which is Temporal's own default:
+
+| Value | Meaning |
+| --- | --- |
+| `Skip` | Drop the new action. |
+| `BufferOne` | Keep one action waiting; drop the rest. |
+| `BufferAll` | Queue every action to run in turn. |
+| `CancelOther` | Cancel the running action, then start the new one. |
+| `TerminateOther` | Terminate the running action and start the new one. |
+| `AllowAll` | Run actions concurrently. |
+
+`catchupWindow` is how late an action may be taken when the Temporal Service was
+unavailable at the time it should have run. **Omitted, it is not managed**: the
+Service applies its own default of one year, stores it, and reports it back, so
+the operator leaves whatever is there alone rather than fighting a value it did
+not set. Its minimum is **ten seconds**; a shorter window is silently raised to
+ten seconds by the Service, so this API refuses it instead.
+
+`pauseOnFailure` pauses the whole schedule when an action fails or times out,
+after its retry policy is exhausted. With `overlap: AllowAll` the pause may not
+stop the next action, because that one may already have started.
+
+#### State: pausing
+
+Temporal treats a schedule's state as **operational** rather than declarative: a
+person can pause a schedule from the UI, and `pauseOnFailure` pauses one without
+anybody asking. So each field here is managed only while it is present:
+
+```text
+state omitted, or state.paused omitted
+-> pausing is not managed; a human can pause and resume freely
+
+state.paused: true
+-> the operator keeps the schedule paused
+
+state.paused: false
+-> the operator keeps the schedule running, putting back a pause
+   applied behind its back
+```
+
+That is what the pointer buys you. Somebody stopping a schedule to investigate
+an incident will not find the operator resuming it five minutes later — unless
+you asked for that explicitly.
+
+```yaml
+spec:
+  state:
+    paused: false
+```
+
+**Pausing is the only state you can declare.** Temporal's remaining-actions count
+is runtime state consumed as Schedule actions execute — the Service ticks it down
+from 10 to 9 to 8 as the schedule acts — so the operator deliberately does not
+manage it as desired state. Reconciling it would write the declared number back
+every time the operator looked, and a schedule asked to run ten times would run
+for ever. The count is preserved untouched on every update; it is simply not
+something this API lets you set. Use `temporal schedule update` if you need to
+change it.
+
+Pausing is different, and that is why it is here: it is a state rather than a
+budget, and it stays where it is put until somebody moves it.
+
+`spec.notes` is the same shape of decision as pausing. Temporal **overwrites**
+the note itself — pausing a schedule from the UI or through `pauseOnFailure`
+replaces it with the Service's own explanation — so declaring a note means the
+operator will put yours back, erasing why the schedule paused.
+
+#### Drift, and why Temporal makes it awkward
+
+Temporal does not give back what it was given. A cron expression is compiled
+into a structured calendar on the way in and the original discarded, so
+describing the schedule afterwards never shows the cron you wrote. Comparing the
+spec against what the Service reports would therefore see permanent drift and
+rewrite the schedule on every resync.
+
+The operator records two fingerprints in `status` instead:
+
+* `status.desiredSpecHash` — the timing this resource last asked for. Comparing
+  it against the current spec answers *has the resource changed since*.
+* `status.appliedSpecHash` — the timing Temporal reported immediately after the
+  operator last wrote it. Comparing it against what Temporal reports now answers
+  *has anybody changed it on the Service since*.
+
+Between them, the operator writes when something has actually changed and stays
+quiet otherwise. Everything else — the action, the policies, the declared state
+— round-trips faithfully and is compared directly.
+
+#### Unmanaged fields are preserved
+
+Temporal's update API **replaces the schedule wholesale**: its own protobuf says
+the four main fields — spec, action, policies and state — "are replaced
+completely by the values in this message". Anything not sent back is destroyed.
+
+So the operator never builds an update from scratch. It reads the schedule,
+overwrites only the fields this CRD declares, and sends the rest back untouched,
+using Temporal's conflict token so a schedule modified in between is refused
+rather than clobbered. A retry policy, a workflow header, a
+`keepOriginalWorkflowId` — none of them is expressible in this CRD, and all of
+them survive an update that changes the timing.
+
+That extends to fields added to Temporal after this operator was written, which
+is why the operator works at the protobuf level rather than through the Go SDK's
+schedule client: the SDK's own model has no `keepOriginalWorkflowId` and no
+workflow header, so updating through it would silently drop both.
+
+#### Adopting an existing Schedule
+
+If a Temporal Schedule with that ID already exists, the operator adopts it:
+`status.ownership: Adopted`, and deleting the resource leaves the schedule
+running.
+
+**Adoption decides deletion rights, not whether declared fields are managed.**
+An adopted schedule still gets the configuration the spec asks for, and the
+reconcile that adopts it writes once — the operator has no recorded fingerprint
+for a schedule it has never written, and cannot compare a cron expression
+against a compiled calendar, so writing is the only answer that leaves the
+schedule matching the spec. It is safe, because the update preserves every field
+the operator does not manage. Afterwards the fingerprints are recorded and the
+schedule is left alone until something actually changes.
+
+Unlike a Temporal Namespace, a Schedule carries **no ownership marker the
+operator can verify**. The only durable free-form space on a schedule is its
+memo, and this CRD hands that to you — writing an operator key into a map you
+also declare would mean either fighting over the map or letting a spec change
+delete the marker. So ownership is controller bookkeeping in `status`, exactly
+as it is for `SearchAttribute` and `NexusEndpoint`. See
+[Ownership and adoption](#ownership-and-adoption).
+
+#### Validation
+
+A `Schedule` is checked in three places, and the split is deliberate:
+
+1. **Kubernetes admission**, for everything OpenAPI and CEL can express:
+   required fields, calendar bounds, the overlap enum, string and collection
+   limits, the fairness key's 64-byte limit, immutability, and that at least one
+   timing rule is present. Most mistakes are caught by `kubectl apply`.
+2. **The operator, before it dials anything**, for what a schema cannot do:
+   parsing cron expressions, loading IANA time zones, comparing durations
+   (`offset` against `every`), and decoding Search Attribute values against
+   their declared types. These report `Ready=False` with reason
+   `InvalidSchedule` and do not retry — only a spec change fixes them.
+3. **The Temporal Service**, which remains the final authority on anything
+   specific to how it is configured.
+
+Cron is validated against Temporal's own grammar rather than a general-purpose
+cron library, because the general-purpose ones differ from Temporal in ways that
+matter — field counts, shorthands, `@every` — and wrongly rejecting a schedule
+Temporal would accept is worse than not checking at all.
+
+#### Limits mirrored from Temporal
+
+| Limit | Value | Source |
+| --- | --- | --- |
+| Schedule ID length | 977 | `limit.maxIDLength` (1000) minus the Service's `temporal-sys-scheduler:` prefix |
+| Workflow ID length | 979 | the same limit minus the timestamp the Service appends |
+| Calendar comment | 200 | `maxCommentLen` |
+| Calendar year | 2000–2100 | `minCalendarYear`, `maxCalendarYear` |
+| Interval minimum | 1s | `validateInterval` |
+| Catch-up window minimum | 10s | `MinCatchupWindow` |
+| Fairness key | 64 bytes | the `Priority` protobuf |
+| Fairness weight | 0.001–1000 | the `Priority` protobuf |
+
+**Nothing on a `Schedule` is capped by count.** Temporal imposes no limit on how
+many calendars, intervals or cron expressions a schedule may have, so neither
+does this: if Temporal accepts the collection, so does the operator.
+
+That is also why each calendar field's bounds are plain `minimum` and `maximum`
+on the field rather than a CEL rule. Kubernetes refuses a CRD whose CEL rules
+could run over an unbounded list, so a rule there would have forced an arbitrary
+cap on how many calendars a schedule may have. The one rule that genuinely needs
+CEL — that a range's `end` is not before its `start` — is checked by the operator
+instead, and reported as `InvalidSchedule`.
+
+#### Schedule limitations
+
+* **No backfill or trigger.** Both are imperative one-off operations rather than
+  declarative state, so they stay with `temporal schedule backfill` and
+  `temporal schedule trigger`.
+* **No retry policy, header or versioning override on the action.** They are not
+  modelled, but they are *preserved* — see
+  [Unmanaged fields are preserved](#unmanaged-fields-are-preserved).
+* **Ownership is not externally verifiable**, as above.
+* **One resource per schedule.** Two resources naming the same schedule ID in
+  the same Temporal Namespace are unsupported and will fight over it.
+* **`spec.action` is a workflow and nothing else.** Temporal's action is a union
+  with one member today; the nesting leaves room for whatever it adds.
+
 ## Ownership and adoption
 
 `Namespace`, `SearchAttribute` and `NexusEndpoint` each record how they came to
@@ -1177,7 +1719,9 @@ Failure reasons, and what to do:
 | `ArchivalURIImmutable` | (`Namespace`) `spec.archival` asks for an Archival URI other than the one Temporal already holds. Temporal will not change it. Remove the `uri` to keep the existing destination, or replace the Namespace. |
 | `TypeConflict` | (`SearchAttribute`) An attribute of that name exists with a different type. Temporal cannot retype it; pick a different name or remove the existing attribute. |
 | `EndpointTaken` | (`NexusEndpoint`) An endpoint of that name already exists Service-wide and was not created by this resource. |
-| `Conflict` | (`NexusEndpoint`) The endpoint changed between being read and written. Self-correcting; the next reconcile retries from a fresh read. |
+| `Conflict` | (`NexusEndpoint`, `Schedule`) The object changed between being read and written. Self-correcting; the reconcile retries from a fresh read, and gives up to the next requeue if it never settles. |
+| `InvalidSchedule` | (`Schedule`) The spec describes a schedule Temporal would not accept — an unparseable cron expression, an unknown time zone, an offset as long as its interval. Only a spec change fixes it, so it is not retried. |
+| `SchedulesNotAllowed` | (`Schedule`) The Temporal Service has schedules switched off for this namespace. Enable them on the Service; rechecked on the ordinary resync. |
 
 ### A resource is stuck in Terminating
 
@@ -1197,6 +1741,7 @@ Finalizer names, should you need to identify them:
 | `Namespace` | `temporal.simonemms.com/namespace` |
 | `SearchAttribute` | `temporal.simonemms.com/search-attribute` |
 | `NexusEndpoint` | `temporal.simonemms.com/nexus-endpoint` |
+| `Schedule` | `temporal.simonemms.com/schedule` |
 
 ## Temporal Cloud and self-hosted
 

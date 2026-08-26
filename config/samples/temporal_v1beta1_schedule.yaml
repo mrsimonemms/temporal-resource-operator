@@ -1,0 +1,108 @@
+# A cron schedule, for migrating an existing cron workflow without rewriting
+# its timing. Temporal compiles cron into a calendar on the way in, so its UI
+# will show a calendar where this says cron.
+apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  labels:
+    app.kubernetes.io/name: temporal-resource-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: schedule-sample
+spec:
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: namespace-sample
+  # The Temporal schedule ID, which is separate from the resource name above -
+  # Kubernetes names are lowercase, schedule IDs are conventionally PascalCase.
+  # It cannot be changed once set.
+  scheduleId: PaymentsNightly
+  schedule:
+    cron:
+      - "30 2 * * *"
+    timeZone: Europe/London
+    # Spread the action out over five minutes, so a fleet of schedules sharing
+    # a time do not all fire at once.
+    jitter: 5m
+  action:
+    workflow:
+      type: ReconcilePayments
+      taskQueue: payments
+      # Optional. Temporal appends a timestamp so each run is distinct; left
+      # out, it generates a UUID per run instead.
+      workflowId: payments-nightly
+      # One entry per workflow argument, each written as JSON.
+      input:
+        - '{"mode":"nightly"}'
+      timeouts:
+        run: 1h
+  policies:
+    # Skip is the default: if last night's run is somehow still going, do not
+    # start another. BufferOne, BufferAll, CancelOther, TerminateOther and
+    # AllowAll are the alternatives.
+    overlap: Skip
+    # How late a missed action may still be taken. Leave it out and Temporal's
+    # own default of a year applies, unmanaged; the minimum is 10s.
+    catchupWindow: 1h
+    pauseOnFailure: true
+  # Delete is the default. Set it to Orphan to leave the Temporal schedule
+  # behind when this resource is deleted - which is also how a deletion blocked
+  # on a missing Connection is released.
+  deletionPolicy: Delete
+---
+# An interval schedule with a structured calendar alongside it. Temporal takes
+# the union of every rule, so this runs every six hours *and* at 09:15 on
+# weekdays.
+apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  labels:
+    app.kubernetes.io/name: temporal-resource-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: schedule-sample-mixed
+spec:
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: namespace-sample
+  scheduleId: PaymentsSweep
+  schedule:
+    intervals:
+      # Every six hours, offset by five hours: 05:00, 11:00, 17:00, 23:00 UTC.
+      # The offset has to be shorter than the period; Temporal refuses the rest.
+      - every: 6h
+        offset: 5h
+    calendars:
+      # 09:15 Monday to Friday. Day of week is 0-6 where 0 is Sunday, so this
+      # is 1-5. Fields left out take Temporal's defaults: an unset second and
+      # minute match 0, and an unset dayOfMonth, month and year match all.
+      - hour:
+          - start: 9
+        minute:
+          - start: 15
+        dayOfWeek:
+          - start: 1
+            end: 5
+        comment: Weekday mornings
+    # And never on the first of the month, whatever the rules above say. Every
+    # field of an exclusion has to match, seconds included.
+    excludeCalendars:
+      - dayOfMonth:
+          - start: 1
+  action:
+    workflow:
+      type: SweepPayments
+      taskQueue: payments
+      searchAttributes:
+        # The attribute has to be registered on the namespace first, which is
+        # what a SearchAttribute resource is for. Values are JSON, read
+        # according to the type.
+        - name: CustomerId
+          type: Keyword
+          value: '"acme"'
+  state:
+    # Omit paused entirely and pausing is not managed, so somebody can pause
+    # the schedule from the Temporal UI and the operator will not undo it.
+    # Setting it makes it managed state like anything else.
+    paused: false
+  deletionPolicy: Orphan

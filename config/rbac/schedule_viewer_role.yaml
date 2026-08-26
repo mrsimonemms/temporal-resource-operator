@@ -1,0 +1,29 @@
+# This rule is not used by the project temporal-resource-operator itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to temporal.simonemms.com resources.
+# This role is intended for users who need visibility into these resources
+# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: temporal-resource-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: schedule-viewer-role
+rules:
+- apiGroups:
+  - temporal.simonemms.com
+  resources:
+  - schedules
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - temporal.simonemms.com
+  resources:
+  - schedules/status
+  verbs:
+  - get

@@ -83,6 +83,7 @@ var expected = map[string][]string{
 	"temporal.simonemms.com_namespaces.yaml":       {"tns"},
 	"temporal.simonemms.com_searchattributes.yaml": {"tsa"},
 	"temporal.simonemms.com_nexusendpoints.yaml":   {"tnx"},
+	"temporal.simonemms.com_schedules.yaml":        {"tsc"},
 }
 
 var _ = Describe("Generated CRDs", func() {
@@ -363,6 +364,407 @@ var _ = Describe("The generated Namespace CRD", func() {
 				Expect(retention.XValidations[0].Rule).
 					To(ContainSubstring(fmt.Sprintf("*%d", int64(Day.Seconds()))))
 			})
+		})
+	})
+})
+
+// calendarBound is one numeric bound in the generated schema.
+type calendarBound struct {
+	Minimum *float64
+	Maximum *float64
+}
+
+// schemaNumber reads a numeric bound out of the decoded schema, whichever Go
+// type the YAML decoder chose for it.
+func schemaNumber(value any) *float64 {
+	switch number := value.(type) {
+	case float64:
+		return &number
+	case int64:
+		asFloat := float64(number)
+
+		return &asFloat
+	case int:
+		asFloat := float64(number)
+
+		return &asFloat
+	default:
+		return nil
+	}
+}
+
+// scheduleCalendarField digs out the schema of one calendar field's range,
+// which sits too deep for the typed shapes above to reach comfortably.
+func scheduleCalendarField(field string) map[string]calendarBound {
+	GinkgoHelper()
+
+	raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+	Expect(err).NotTo(HaveOccurred())
+
+	var doc map[string]any
+	Expect(yaml.Unmarshal(raw, &doc)).To(Succeed())
+
+	node := doc
+	for _, step := range []string{
+		"spec", "versions",
+	} {
+		next, ok := node[step]
+		Expect(ok).To(BeTrue(), step)
+
+		if step == "versions" {
+			versions, ok := next.([]any)
+			Expect(ok).To(BeTrue())
+			Expect(versions).To(HaveLen(1))
+			node, ok = versions[0].(map[string]any)
+			Expect(ok).To(BeTrue())
+
+			continue
+		}
+
+		node, ok = next.(map[string]any)
+		Expect(ok).To(BeTrue(), step)
+	}
+
+	for _, step := range []string{
+		"schema", "openAPIV3Schema", "properties", "spec", "properties", "schedule",
+		"properties", "calendars", "items", "properties", field, "items", "properties",
+	} {
+		next, ok := node[step]
+		Expect(ok).To(BeTrue(), step)
+
+		node, ok = next.(map[string]any)
+		Expect(ok).To(BeTrue(), step)
+	}
+
+	bounds := map[string]calendarBound{}
+
+	for name, value := range node {
+		property, ok := value.(map[string]any)
+		Expect(ok).To(BeTrue(), name)
+
+		bounds[name] = calendarBound{
+			Minimum: schemaNumber(property["minimum"]),
+			Maximum: schemaNumber(property["maximum"]),
+		}
+	}
+
+	return bounds
+}
+
+// scheduleSchema is the slice of the Schedule CRD these specs assert on. The
+// full schema is controller-gen's business; what matters here is that the rules
+// mirroring Temporal's own constraints are actually in the file the API server
+// will enforce, rather than only in the Go comments that produced it.
+type scheduleSchema struct {
+	Spec struct {
+		Versions []struct {
+			Schema struct {
+				OpenAPIV3Schema struct {
+					Properties struct {
+						Spec struct {
+							Required   []string `json:"required"`
+							Properties map[string]struct {
+								Type         string   `json:"type"`
+								MinLength    *int64   `json:"minLength"`
+								MaxLength    *int64   `json:"maxLength"`
+								MaxItems     *int64   `json:"maxItems"`
+								Default      any      `json:"default"`
+								Enum         []string `json:"enum"`
+								Required     []string `json:"required"`
+								XValidations []struct {
+									Rule    string `json:"rule"`
+									Message string `json:"message"`
+								} `json:"x-kubernetes-validations"`
+								Properties map[string]struct {
+									Type         string   `json:"type"`
+									MinLength    *int64   `json:"minLength"`
+									MaxLength    *int64   `json:"maxLength"`
+									MaxItems     *int64   `json:"maxItems"`
+									Minimum      *float64 `json:"minimum"`
+									Maximum      *float64 `json:"maximum"`
+									Default      any      `json:"default"`
+									Enum         []string `json:"enum"`
+									Required     []string `json:"required"`
+									XValidations []struct {
+										Rule    string `json:"rule"`
+										Message string `json:"message"`
+									} `json:"x-kubernetes-validations"`
+								} `json:"properties"`
+							} `json:"properties"`
+						} `json:"spec"`
+					} `json:"properties"`
+				} `json:"openAPIV3Schema"`
+			} `json:"schema"`
+		} `json:"versions"`
+	} `json:"spec"`
+}
+
+var _ = Describe("The generated Schedule CRD", func() {
+	var parsed scheduleSchema
+
+	BeforeEach(func() {
+		raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(yaml.Unmarshal(raw, &parsed)).To(Succeed())
+		Expect(parsed.Spec.Versions).To(HaveLen(1))
+	})
+
+	spec := func() struct {
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Type         string   `json:"type"`
+			MinLength    *int64   `json:"minLength"`
+			MaxLength    *int64   `json:"maxLength"`
+			MaxItems     *int64   `json:"maxItems"`
+			Default      any      `json:"default"`
+			Enum         []string `json:"enum"`
+			Required     []string `json:"required"`
+			XValidations []struct {
+				Rule    string `json:"rule"`
+				Message string `json:"message"`
+			} `json:"x-kubernetes-validations"`
+			Properties map[string]struct {
+				Type         string   `json:"type"`
+				MinLength    *int64   `json:"minLength"`
+				MaxLength    *int64   `json:"maxLength"`
+				MaxItems     *int64   `json:"maxItems"`
+				Minimum      *float64 `json:"minimum"`
+				Maximum      *float64 `json:"maximum"`
+				Default      any      `json:"default"`
+				Enum         []string `json:"enum"`
+				Required     []string `json:"required"`
+				XValidations []struct {
+					Rule    string `json:"rule"`
+					Message string `json:"message"`
+				} `json:"x-kubernetes-validations"`
+			} `json:"properties"`
+		} `json:"properties"`
+	} {
+		return parsed.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec
+	}
+
+	It("should require the fields that identify the schedule and what it does", func() {
+		Expect(spec().Required).To(ConsistOf(
+			"scheduleId", "connectionRef", "namespaceRef", "schedule", "action",
+		))
+	})
+
+	Describe("spec.scheduleId", func() {
+		It("should be a non-empty string bounded by Temporal's own ID limit", func() {
+			scheduleID := spec().Properties["scheduleId"]
+
+			Expect(scheduleID.Type).To(Equal("string"))
+			Expect(scheduleID.MinLength).NotTo(BeNil())
+			Expect(*scheduleID.MinLength).To(BeNumerically("==", 1))
+			Expect(scheduleID.MaxLength).NotTo(BeNil())
+			Expect(*scheduleID.MaxLength).To(BeNumerically("==", MaxScheduleIDLength))
+		})
+
+		It("should be immutable", func() {
+			// Changing it would not rename anything, it would point the resource
+			// at a different schedule and strand the original.
+			rules := spec().Properties["scheduleId"].XValidations
+			Expect(rules).NotTo(BeEmpty())
+			Expect(rules[0].Rule).To(Equal("self == oldSelf"))
+			Expect(rules[0].Message).To(ContainSubstring("immutable"))
+		})
+	})
+
+	DescribeTable(
+		"should make the dependency references required and immutable",
+		func(field string) {
+			rules := spec().Properties[field].XValidations
+			Expect(rules).To(HaveLen(2))
+
+			var messages []string
+			for _, rule := range rules {
+				messages = append(messages, rule.Message)
+			}
+
+			Expect(messages).To(ContainElement(ContainSubstring("required")))
+			Expect(messages).To(ContainElement(ContainSubstring("immutable")))
+		},
+		Entry("connectionRef", "connectionRef"),
+		Entry("namespaceRef", "namespaceRef"),
+	)
+
+	Describe("spec.schedule", func() {
+		It("should insist on at least one rule", func() {
+			// A timing specification with no calendars, intervals or cron would
+			// never act at all, so it is a mistake rather than a schedule.
+			rules := spec().Properties["schedule"].XValidations
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.calendars)"))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.intervals)"))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.cron)"))
+			Expect(rules[0].Message).To(ContainSubstring("at least one"))
+		})
+
+		DescribeTable(
+			"should put no length limit on a collection Temporal does not limit",
+			func(field string) {
+				// The pinned Service imposes no count limit on calendars,
+				// intervals or cron strings, so neither does this. A cap here
+				// would be the operator refusing a schedule Temporal would have
+				// accepted, for no reason but its own comfort.
+				property := spec().Properties["schedule"].Properties[field]
+
+				Expect(property.Type).To(Equal("array"))
+				Expect(property.MaxItems).To(BeNil(), field)
+			},
+			Entry("calendars", "calendars"),
+			Entry("intervals", "intervals"),
+			Entry("cron", "cron"),
+			Entry("excludeCalendars", "excludeCalendars"),
+		)
+
+		It("should carry no length limit anywhere in the schema", func() {
+			// Temporal caps none of a Schedule's collections, so neither does
+			// this. The whole file is checked rather than a list of fields,
+			// because a cap reintroduced anywhere - on a collection added later,
+			// say - would be just as wrong.
+			//
+			// A limit is only defensible here if Kubernetes forces one, which it
+			// does when a CEL rule could run over an unbounded list. That is why
+			// each calendar field's bounds are plain minimum and maximum on its
+			// own range type rather than a CEL rule walking the list: no CEL
+			// inside the collections means nothing forces a cap on them.
+			raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(regexp.MustCompile(`(?m)^\s+maxItems:`).FindAllString(string(raw), -1)).To(BeEmpty())
+		})
+	})
+
+	Describe("spec.policies", func() {
+		It("should offer exactly Temporal's overlap policies", func() {
+			overlap := spec().Properties["policies"].Properties["overlap"]
+
+			Expect(overlap.Enum).To(ConsistOf(
+				"Skip", "BufferOne", "BufferAll", "CancelOther", "TerminateOther", "AllowAll",
+			))
+		})
+
+		It("should default the overlap policy to Temporal's own default", func() {
+			Expect(spec().Properties["policies"].Properties["overlap"].Default).To(Equal("Skip"))
+		})
+	})
+
+	Describe("spec.state", func() {
+		It("should default nothing, so an omitted field stays unmanaged", func() {
+			// The whole state model rests on this: a default would turn
+			// "somebody may pause this by hand" into "the operator resumes it on
+			// the next resync".
+			state := spec().Properties["state"]
+
+			Expect(state.Required).To(BeEmpty())
+			Expect(state.Properties["paused"].Type).To(Equal("boolean"))
+			Expect(state.Properties["paused"].Default).To(BeNil())
+		})
+
+		It("should offer pausing and nothing else", func() {
+			// Temporal's remaining-action count is a counter the Service
+			// consumes, not a state anybody sets, so it is deliberately absent.
+			// Reconciling it would write the declared number back every time the
+			// operator looked, and a schedule asked to run ten times would run
+			// for ever.
+			state := spec().Properties["state"]
+
+			Expect(state.Properties).To(HaveLen(1))
+			Expect(state.Properties).To(HaveKey("paused"))
+			Expect(state.Properties).NotTo(HaveKey("limitedActions"))
+			Expect(state.Properties).NotTo(HaveKey("remainingActions"))
+		})
+
+		It("should not mention remaining actions anywhere in the schema", func() {
+			// Belt and braces against it being reintroduced somewhere else in
+			// the spec - as a policy, say, or on the action.
+			raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(string(raw)).NotTo(ContainSubstring("limitedActions:"))
+			Expect(string(raw)).NotTo(ContainSubstring("remainingActions:"))
+		})
+	})
+
+	It("should default the deletion policy to Delete", func() {
+		deletionPolicy := spec().Properties["deletionPolicy"]
+
+		Expect(deletionPolicy.Enum).To(ConsistOf("Delete", "Orphan"))
+		Expect(deletionPolicy.Default).To(Equal("Delete"))
+	})
+
+	It("should leave the schedule's own search attributes unbounded", func() {
+		// Temporal limits how many search attributes a namespace may have, not
+		// how many one schedule may set, so neither does this.
+		searchAttributes := spec().Properties["searchAttributes"]
+
+		Expect(searchAttributes.Type).To(Equal("array"))
+		Expect(searchAttributes.MaxItems).To(BeNil())
+	})
+
+	Describe("the rules that mirror Temporal's numeric limits", func() {
+		// These live deep in the schema, so rather than modelling every level
+		// they are asserted against the raw document. What matters is that the
+		// rule is present and says the right number - a rule that silently
+		// stopped being generated would be invisible otherwise.
+		var raw string
+
+		BeforeEach(func() {
+			content, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			raw = string(content)
+		})
+
+		DescribeTable(
+			"should carry the calendar bounds the Service enforces",
+			func(field string, minVal, maxVal int) {
+				// Expressed as plain minimum and maximum on the field's own
+				// range type. That is what keeps the collections uncapped: a CEL
+				// rule here would make Kubernetes demand a maxItems on every
+				// list containing it.
+				calendar := scheduleCalendarField(field)
+
+				for _, bound := range []string{"start", "end"} {
+					Expect(calendar[bound].Minimum).NotTo(BeNil(), "%s.%s", field, bound)
+					Expect(*calendar[bound].Minimum).To(BeNumerically("==", minVal), "%s.%s", field, bound)
+					Expect(calendar[bound].Maximum).NotTo(BeNil(), "%s.%s", field, bound)
+					Expect(*calendar[bound].Maximum).To(BeNumerically("==", maxVal), "%s.%s", field, bound)
+				}
+
+				Expect(calendar["step"].Minimum).NotTo(BeNil())
+				Expect(*calendar["step"].Minimum).To(BeNumerically("==", 1))
+			},
+			Entry("second", "second", 0, 59),
+			Entry("minute", "minute", 0, 59),
+			Entry("hour", "hour", 0, 23),
+			Entry("dayOfMonth", "dayOfMonth", 1, 31),
+			Entry("month", "month", 1, 12),
+			// Sunday is 0, Temporal's own numbering.
+			Entry("dayOfWeek", "dayOfWeek", 0, 6),
+			Entry("year", "year", MinCalendarYear, MaxCalendarYear),
+		)
+
+		It("should carry no CEL rule inside a calendar", func() {
+			// The property that keeps every collection uncapped. A rule added
+			// here would compile, and then Kubernetes would refuse to install
+			// the CRD unless a maxItems came with it.
+			Expect(raw).NotTo(ContainSubstring("self.all(r,"))
+		})
+
+		It("should measure the fairness key in bytes", func() {
+			// Temporal's limit is 64 bytes, not 64 characters, so the rule has
+			// to convert before measuring - size(self) would be wrong.
+			Expect(raw).To(ContainSubstring("size(bytes(self)) <= 64"))
+		})
+
+		It("should say that day of week counts Sunday as zero", func() {
+			// Getting this backwards is the easiest mistake to make with a
+			// calendar spec, so the field's own description says which way round
+			// it is - and that is what a user reading "kubectl explain" sees.
+			// The assertion allows for YAML folding the long line, which is why
+			// it looks for the phrase rather than the whole sentence.
+			Expect(raw).To(ContainSubstring("0 is Sunday"))
 		})
 	})
 })

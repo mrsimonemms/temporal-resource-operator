@@ -6,6 +6,7 @@ resources:
 - bases/temporal.simonemms.com_namespaces.yaml
 - bases/temporal.simonemms.com_searchattributes.yaml
 - bases/temporal.simonemms.com_nexusendpoints.yaml
+- bases/temporal.simonemms.com_schedules.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
