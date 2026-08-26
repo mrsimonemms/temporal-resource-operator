@@ -83,6 +83,7 @@ var expected = map[string][]string{
 	"temporal.simonemms.com_namespaces.yaml":       {"tns"},
 	"temporal.simonemms.com_searchattributes.yaml": {"tsa"},
 	"temporal.simonemms.com_nexusendpoints.yaml":   {"tnx"},
+	"temporal.simonemms.com_schedules.yaml":        {"tsc"},
 }
 
 var _ = Describe("Generated CRDs", func() {
@@ -363,6 +364,263 @@ var _ = Describe("The generated Namespace CRD", func() {
 				Expect(retention.XValidations[0].Rule).
 					To(ContainSubstring(fmt.Sprintf("*%d", int64(Day.Seconds()))))
 			})
+		})
+	})
+})
+
+// scheduleSchema is the slice of the Schedule CRD these specs assert on. The
+// full schema is controller-gen's business; what matters here is that the rules
+// mirroring Temporal's own constraints are actually in the file the API server
+// will enforce, rather than only in the Go comments that produced it.
+type scheduleSchema struct {
+	Spec struct {
+		Versions []struct {
+			Schema struct {
+				OpenAPIV3Schema struct {
+					Properties struct {
+						Spec struct {
+							Required   []string `json:"required"`
+							Properties map[string]struct {
+								Type         string   `json:"type"`
+								MinLength    *int64   `json:"minLength"`
+								MaxLength    *int64   `json:"maxLength"`
+								MaxItems     *int64   `json:"maxItems"`
+								Default      any      `json:"default"`
+								Enum         []string `json:"enum"`
+								Required     []string `json:"required"`
+								XValidations []struct {
+									Rule    string `json:"rule"`
+									Message string `json:"message"`
+								} `json:"x-kubernetes-validations"`
+								Properties map[string]struct {
+									Type         string   `json:"type"`
+									MinLength    *int64   `json:"minLength"`
+									MaxLength    *int64   `json:"maxLength"`
+									MaxItems     *int64   `json:"maxItems"`
+									Minimum      *float64 `json:"minimum"`
+									Maximum      *float64 `json:"maximum"`
+									Default      any      `json:"default"`
+									Enum         []string `json:"enum"`
+									Required     []string `json:"required"`
+									XValidations []struct {
+										Rule    string `json:"rule"`
+										Message string `json:"message"`
+									} `json:"x-kubernetes-validations"`
+								} `json:"properties"`
+							} `json:"properties"`
+						} `json:"spec"`
+					} `json:"properties"`
+				} `json:"openAPIV3Schema"`
+			} `json:"schema"`
+		} `json:"versions"`
+	} `json:"spec"`
+}
+
+var _ = Describe("The generated Schedule CRD", func() {
+	var parsed scheduleSchema
+
+	BeforeEach(func() {
+		raw, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(yaml.Unmarshal(raw, &parsed)).To(Succeed())
+		Expect(parsed.Spec.Versions).To(HaveLen(1))
+	})
+
+	spec := func() struct {
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Type         string   `json:"type"`
+			MinLength    *int64   `json:"minLength"`
+			MaxLength    *int64   `json:"maxLength"`
+			MaxItems     *int64   `json:"maxItems"`
+			Default      any      `json:"default"`
+			Enum         []string `json:"enum"`
+			Required     []string `json:"required"`
+			XValidations []struct {
+				Rule    string `json:"rule"`
+				Message string `json:"message"`
+			} `json:"x-kubernetes-validations"`
+			Properties map[string]struct {
+				Type         string   `json:"type"`
+				MinLength    *int64   `json:"minLength"`
+				MaxLength    *int64   `json:"maxLength"`
+				MaxItems     *int64   `json:"maxItems"`
+				Minimum      *float64 `json:"minimum"`
+				Maximum      *float64 `json:"maximum"`
+				Default      any      `json:"default"`
+				Enum         []string `json:"enum"`
+				Required     []string `json:"required"`
+				XValidations []struct {
+					Rule    string `json:"rule"`
+					Message string `json:"message"`
+				} `json:"x-kubernetes-validations"`
+			} `json:"properties"`
+		} `json:"properties"`
+	} {
+		return parsed.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec
+	}
+
+	It("should require the fields that identify the schedule and what it does", func() {
+		Expect(spec().Required).To(ConsistOf(
+			"scheduleId", "connectionRef", "namespaceRef", "schedule", "action",
+		))
+	})
+
+	Describe("spec.scheduleId", func() {
+		It("should be a non-empty string bounded by Temporal's own ID limit", func() {
+			scheduleID := spec().Properties["scheduleId"]
+
+			Expect(scheduleID.Type).To(Equal("string"))
+			Expect(scheduleID.MinLength).NotTo(BeNil())
+			Expect(*scheduleID.MinLength).To(BeNumerically("==", 1))
+			Expect(scheduleID.MaxLength).NotTo(BeNil())
+			Expect(*scheduleID.MaxLength).To(BeNumerically("==", MaxScheduleIDLength))
+		})
+
+		It("should be immutable", func() {
+			// Changing it would not rename anything, it would point the resource
+			// at a different schedule and strand the original.
+			rules := spec().Properties["scheduleId"].XValidations
+			Expect(rules).NotTo(BeEmpty())
+			Expect(rules[0].Rule).To(Equal("self == oldSelf"))
+			Expect(rules[0].Message).To(ContainSubstring("immutable"))
+		})
+	})
+
+	DescribeTable(
+		"should make the dependency references required and immutable",
+		func(field string) {
+			rules := spec().Properties[field].XValidations
+			Expect(rules).To(HaveLen(2))
+
+			var messages []string
+			for _, rule := range rules {
+				messages = append(messages, rule.Message)
+			}
+
+			Expect(messages).To(ContainElement(ContainSubstring("required")))
+			Expect(messages).To(ContainElement(ContainSubstring("immutable")))
+		},
+		Entry("connectionRef", "connectionRef"),
+		Entry("namespaceRef", "namespaceRef"),
+	)
+
+	Describe("spec.schedule", func() {
+		It("should insist on at least one rule", func() {
+			// A timing specification with no calendars, intervals or cron would
+			// never act at all, so it is a mistake rather than a schedule.
+			rules := spec().Properties["schedule"].XValidations
+			Expect(rules).To(HaveLen(1))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.calendars)"))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.intervals)"))
+			Expect(rules[0].Rule).To(ContainSubstring("has(self.cron)"))
+			Expect(rules[0].Message).To(ContainSubstring("at least one"))
+		})
+
+		DescribeTable(
+			"should bound each collection",
+			func(field string) {
+				property := spec().Properties["schedule"].Properties[field]
+
+				Expect(property.Type).To(Equal("array"))
+				Expect(property.MaxItems).NotTo(BeNil(), field)
+				Expect(*property.MaxItems).To(BeNumerically("==", MaxScheduleSpecItems))
+			},
+			Entry("calendars", "calendars"),
+			Entry("intervals", "intervals"),
+			Entry("cron", "cron"),
+			Entry("excludeCalendars", "excludeCalendars"),
+		)
+	})
+
+	Describe("spec.policies", func() {
+		It("should offer exactly Temporal's overlap policies", func() {
+			overlap := spec().Properties["policies"].Properties["overlap"]
+
+			Expect(overlap.Enum).To(ConsistOf(
+				"Skip", "BufferOne", "BufferAll", "CancelOther", "TerminateOther", "AllowAll",
+			))
+		})
+
+		It("should default the overlap policy to Temporal's own default", func() {
+			Expect(spec().Properties["policies"].Properties["overlap"].Default).To(Equal("Skip"))
+		})
+	})
+
+	Describe("spec.state", func() {
+		It("should default nothing, so an omitted field stays unmanaged", func() {
+			// The whole state model rests on this: a default would turn
+			// "somebody may pause this by hand" into "the operator resumes it on
+			// the next resync".
+			state := spec().Properties["state"]
+
+			Expect(state.Required).To(BeEmpty())
+			Expect(state.Properties["paused"].Type).To(Equal("boolean"))
+			Expect(state.Properties["paused"].Default).To(BeNil())
+			Expect(state.Properties["limitedActions"].Default).To(BeNil())
+		})
+
+		It("should refuse a limited action count below one", func() {
+			limited := spec().Properties["state"].Properties["limitedActions"]
+
+			Expect(limited.Minimum).NotTo(BeNil())
+			Expect(*limited.Minimum).To(BeNumerically("==", 1))
+		})
+	})
+
+	It("should default the deletion policy to Delete", func() {
+		deletionPolicy := spec().Properties["deletionPolicy"]
+
+		Expect(deletionPolicy.Enum).To(ConsistOf("Delete", "Orphan"))
+		Expect(deletionPolicy.Default).To(Equal("Delete"))
+	})
+
+	It("should bound the schedule's own search attributes", func() {
+		searchAttributes := spec().Properties["searchAttributes"]
+
+		Expect(searchAttributes.Type).To(Equal("array"))
+		Expect(searchAttributes.MaxItems).NotTo(BeNil())
+	})
+
+	Describe("the rules that mirror Temporal's numeric limits", func() {
+		// These live deep in the schema, so rather than modelling every level
+		// they are asserted against the raw document. What matters is that the
+		// rule is present and says the right number - a rule that silently
+		// stopped being generated would be invisible otherwise.
+		var raw string
+
+		BeforeEach(func() {
+			content, err := os.ReadFile(filepath.Join(crdBases, "temporal.simonemms.com_schedules.yaml"))
+			Expect(err).NotTo(HaveOccurred())
+			raw = string(content)
+		})
+
+		DescribeTable(
+			"should carry the calendar bounds the Service enforces",
+			func(rule string) {
+				Expect(raw).To(ContainSubstring(rule))
+			},
+			Entry("second", "r.start >= 0 && r.start <= 59"),
+			Entry("hour", "r.start >= 0 && r.start <= 23"),
+			Entry("dayOfMonth", "r.start >= 1 && r.start <= 31"),
+			Entry("month", "r.start >= 1 && r.start <= 12"),
+			Entry("dayOfWeek", "r.start >= 0 && r.start <= 6"),
+			Entry("year", "r.start >= 2000 && r.start <= 2100"),
+		)
+
+		It("should measure the fairness key in bytes", func() {
+			// Temporal's limit is 64 bytes, not 64 characters, so the rule has
+			// to convert before measuring - size(self) would be wrong.
+			Expect(raw).To(ContainSubstring("size(bytes(self)) <= 64"))
+		})
+
+		It("should say that day of week counts Sunday as zero", func() {
+			// Getting this backwards is the easiest mistake to make with a
+			// calendar spec, so the rejection message says which way round it
+			// is. The assertion allows for YAML folding the long message across
+			// lines, which is why it looks for the phrase rather than the whole
+			// sentence.
+			Expect(raw).To(ContainSubstring("0 is Sunday"))
 		})
 	})
 })

@@ -45,4 +45,13 @@ resources:
   kind: NexusEndpoint
   path: github.com/mrsimonemms/temporal-resource-operator/api/v1beta1
   version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: simonemms.com
+  group: temporal
+  kind: Schedule
+  path: github.com/mrsimonemms/temporal-resource-operator/api/v1beta1
+  version: v1beta1
 version: "3"

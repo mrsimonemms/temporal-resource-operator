@@ -66,6 +66,7 @@ tests:
             resources:
               - namespaces/finalizers
               - nexusendpoints/finalizers
+              - schedules/finalizers
               - searchattributes/finalizers
             verbs:
               - update
@@ -78,6 +79,7 @@ tests:
               - connections/status
               - namespaces/status
               - nexusendpoints/status
+              - schedules/status
               - searchattributes/status
             verbs:
               - get

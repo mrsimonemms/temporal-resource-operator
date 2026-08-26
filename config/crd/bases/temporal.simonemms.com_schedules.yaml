@@ -1,0 +1,1493 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: schedules.temporal.simonemms.com
+spec:
+  group: temporal.simonemms.com
+  names:
+    kind: Schedule
+    listKind: ScheduleList
+    plural: schedules
+    shortNames:
+    - tsc
+    singular: schedule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.scheduleId
+      name: Schedule ID
+      type: string
+    - jsonPath: .spec.namespaceRef.name
+      name: Temporal NS
+      type: string
+    - jsonPath: .spec.action.workflow.type
+      name: Workflow
+      type: string
+    - jsonPath: .status.ownership
+      name: Ownership
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.action.workflow.taskQueue
+      name: Task Queue
+      priority: 1
+      type: string
+    - jsonPath: .spec.state.paused
+      name: Paused
+      priority: 1
+      type: boolean
+    - jsonPath: .spec.schedule.timeZone
+      name: Time Zone
+      priority: 1
+      type: string
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Schedule is the Schema for the schedules API.
+
+          One resource manages exactly one Temporal schedule. Which one is
+          spec.scheduleId; metadata.name is Kubernetes identity and is never sent to
+          Temporal. The two are separate because Kubernetes only accepts lowercase names
+          for a resource, and that is not something a CRD can relax, whereas schedule
+          IDs are conventionally PascalCase.
+
+          The timing specification is deliberately not a printer column. A schedule's
+          timing is a set of calendars, intervals and cron expressions, and none of it
+          fits usefully in a column.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Schedule
+            properties:
+              action:
+                description: action says what the schedule does when it acts.
+                properties:
+                  workflow:
+                    description: workflow starts a workflow execution.
+                    properties:
+                      input:
+                        description: |-
+                          input holds the workflow's arguments, one entry per argument, each written
+                          as JSON.
+
+                          This is the declarative equivalent of "temporal workflow start --input":
+                          each entry is encoded with Temporal's default data converter into a
+                          json/plain payload, so a worker written against any SDK deserialises them
+                          the way it always would. A workflow taking a single struct argument takes
+                          one entry.
+
+                          The CLI's file and base64 forms are deliberately absent. A CRD is not a
+                          filesystem, and a payload that cannot be read in the spec cannot be
+                          reviewed in a pull request.
+                        items:
+                          minLength: 1
+                          type: string
+                        maxItems: 32
+                        type: array
+                      memo:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          memo is non-indexed information attached to each run, shown in Temporal's
+                          UI. Each value is written as JSON, like input.
+
+                          This is the *workflow's* memo. The schedule has its own, at spec.memo.
+                        type: object
+                      priority:
+                        description: |-
+                          priority controls how this workflow's tasks are ordered against others on
+                          the same task queue.
+                        properties:
+                          fairnessKey:
+                            description: |-
+                              fairnessKey groups this workflow's tasks for fair dispatch - a tenant ID,
+                              or a fixed label like "high".
+
+                              Temporal limits it to 64 **bytes**, not characters, which is why the rule
+                              below measures the encoded form.
+                            minLength: 1
+                            type: string
+                            x-kubernetes-validations:
+                            - message: fairnessKey must be at most 64 bytes
+                              rule: size(bytes(self)) <= 64
+                          fairnessWeight:
+                            description: |-
+                              fairnessWeight is this key's share of dispatch relative to other keys.
+                              Defaults to 1.
+
+                              Written as a decimal string, because the value is fractional: "9", "0.5",
+                              "0.001". Temporal clamps it to between 0.001 and 1000; this API refuses
+                              anything outside that instead, so what the spec says is what happens.
+                            maxLength: 16
+                            pattern: ^(0|[1-9][0-9]*)(\.[0-9]+)?$
+                            type: string
+                          key:
+                            description: |-
+                              key is the priority, where smaller means sooner.
+
+                              Temporal's range is 1 to a server-configured maximum which defaults to 5,
+                              and an absent priority behaves as the middle of that range. The upper
+                              bound here is the default maximum; a Service configured with more priority
+                              levels than that will accept values this API refuses.
+                            format: int32
+                            maximum: 5
+                            minimum: 1
+                            type: integer
+                        type: object
+                      searchAttributes:
+                        description: |-
+                          searchAttributes are indexed values attached to each run, so the runs a
+                          schedule starts can be found by them.
+
+                          This is the *workflow's* search attributes. The schedule has its own, at
+                          spec.searchAttributes.
+                        items:
+                          description: |-
+                            ScheduleSearchAttribute is one typed search attribute value.
+
+                            The type has to be stated because a search attribute's value cannot be
+                            interpreted without it: "2026-01-01" is a Datetime or a Keyword depending
+                            entirely on how the attribute was registered, and sending the wrong one is
+                            rejected by Temporal.
+                          properties:
+                            name:
+                              description: |-
+                                name is the search attribute's name, exactly as Temporal knows it -
+                                "CustomerId", not "customer-id". It must already be registered on the
+                                namespace, which is what a SearchAttribute resource is for.
+                              maxLength: 255
+                              minLength: 1
+                              type: string
+                            type:
+                              description: |-
+                                type is the type of the value, using the same names as a SearchAttribute
+                                resource and the Temporal CLI.
+                              enum:
+                              - Bool
+                              - Datetime
+                              - Double
+                              - Int
+                              - Keyword
+                              - KeywordList
+                              - Text
+                              type: string
+                            value:
+                              description: |-
+                                value is the value, written as JSON.
+
+                                What that means follows the type: a Bool takes "true", an Int takes "7", a
+                                Double takes "1.5", a Keyword or Text takes a quoted string like
+                                "\"gold\"", a Datetime takes a quoted RFC 3339 timestamp, and a
+                                KeywordList takes a JSON array of strings.
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          - type
+                          - value
+                          type: object
+                        maxItems: 32
+                        type: array
+                      staticDetails:
+                        description: |-
+                          staticDetails is a longer description of each run, shown in Temporal's UI.
+                          Temporal Markdown, and may span multiple lines.
+                        type: string
+                      staticSummary:
+                        description: |-
+                          staticSummary is a one-line description of each run, shown in Temporal's
+                          UI. Single-line Temporal Markdown.
+                        type: string
+                      taskQueue:
+                        description: |-
+                          taskQueue is the task queue the workflow's tasks are put on. A worker has
+                          to be polling it, or the runs will start and sit there.
+                        maxLength: 1000
+                        minLength: 1
+                        type: string
+                      timeouts:
+                        description: timeouts bound each run. Omitted fields take
+                          the namespace's defaults.
+                        properties:
+                          execution:
+                            description: |-
+                              execution is how long the whole workflow execution may take, retries and
+                              continue-as-new included.
+                            maxLength: 20
+                            pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                            type: string
+                          run:
+                            description: run is how long a single run of the workflow
+                              may take.
+                            maxLength: 20
+                            pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                            type: string
+                          task:
+                            description: |-
+                              task is how long a worker has to process one workflow task once it has
+                              picked it up.
+                            maxLength: 20
+                            pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                            type: string
+                        type: object
+                      type:
+                        description: type is the workflow type to start, as registered
+                          by your worker.
+                        maxLength: 1000
+                        minLength: 1
+                        type: string
+                      workflowId:
+                        description: |-
+                          workflowId is the workflow ID each run is started with.
+
+                          Temporal appends a timestamp to it so that each run is distinct, which is
+                          why the length limit here is short of the usual one. Omit it and Temporal
+                          generates a UUID per run - fine, but far less readable in the UI.
+                        maxLength: 979
+                        minLength: 1
+                        type: string
+                    required:
+                    - taskQueue
+                    - type
+                    type: object
+                required:
+                - workflow
+                type: object
+              connectionRef:
+                description: |-
+                  LocalObjectReference contains enough information to let you locate the
+                  referenced object inside the same namespace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: connectionRef.name is required
+                  rule: self.name != ''
+                - message: connectionRef.name is immutable
+                  rule: self.name == oldSelf.name
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  deletionPolicy decides what happens to the Temporal schedule when this
+                  resource is deleted. Defaults to Delete.
+
+                  Delete removes the schedule along with the resource, where the operator
+                  created it. Orphan leaves it behind and contacts Temporal not at all,
+                  which is how a resource is released when the Connection it would have
+                  needed no longer exists.
+
+                  This may be changed while the resource is being deleted, which is the
+                  supported way out of a deletion blocked on a missing Connection.
+                enum:
+                - Delete
+                - Orphan
+                type: string
+              memo:
+                additionalProperties:
+                  type: string
+                description: |-
+                  memo is non-indexed information attached to the schedule itself, shown
+                  when listing schedules. Each value is written as JSON.
+
+                  This is the *schedule's* memo, not the workflow's - that one is at
+                  spec.action.workflow.memo.
+                type: object
+              namespaceRef:
+                description: |-
+                  LocalObjectReference contains enough information to let you locate the
+                  referenced object inside the same namespace.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: namespaceRef.name is required
+                  rule: self.name != ''
+                - message: namespaceRef.name is immutable
+                  rule: self.name == oldSelf.name
+              notes:
+                description: |-
+                  notes is a human-readable note stored on the schedule, shown in Temporal's
+                  UI - why it exists, who owns it, why it is paused.
+
+                  Omitting it leaves whatever note is there alone, which matters because
+                  **Temporal overwrites this field itself**: pausing a schedule from the UI
+                  or through pauseOnFailure replaces the note with its own explanation.
+                  Declaring a note means the operator will put it back, erasing Temporal's
+                  explanation of why the schedule paused.
+                type: string
+              policies:
+                description: policies control how the schedule behaves around overlaps
+                  and failures.
+                properties:
+                  catchupWindow:
+                    description: |-
+                      catchupWindow is how late an action may be taken when the Temporal Service
+                      was unavailable at the time it should have run.
+
+                      Omitted, it is not managed: the Service applies its own default of one
+                      year, stores it, and reports it back, so the operator leaves whatever is
+                      there alone rather than fighting a value it did not set.
+
+                      The minimum is ten seconds. A shorter window is silently raised to ten
+                      seconds by the Service, so this API refuses it instead - a spec that does
+                      not describe what happens is worse than a rejected one.
+                    maxLength: 20
+                    pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                    type: string
+                  overlap:
+                    default: Skip
+                    description: |-
+                      overlap decides what happens when an action would start while an earlier
+                      one is still running. Defaults to Skip, which is Temporal's default.
+
+                      This can be changed on a running schedule, though changing it while
+                      actions are buffered can produce surprising results: in general the later
+                      policy wins.
+                    enum:
+                    - Skip
+                    - BufferOne
+                    - BufferAll
+                    - CancelOther
+                    - TerminateOther
+                    - AllowAll
+                    type: string
+                  pauseOnFailure:
+                    description: |-
+                      pauseOnFailure pauses the whole schedule when an action fails or times
+                      out, after its retry policy is exhausted.
+
+                      With overlap AllowAll the pause may not stop the next action, because that
+                      one may already have started.
+                    type: boolean
+                type: object
+              schedule:
+                description: schedule says when the schedule acts.
+                properties:
+                  calendars:
+                    description: calendars match times against the calendar, written
+                      out in full.
+                    items:
+                      description: |-
+                        ScheduleCalendar matches times against the calendar, the way a cron expression
+                        does but written out in full.
+
+                        A time matches when at least one range of every field matches it. The
+                        defaults are Temporal's, and they are what make a calendar readable: a
+                        calendar naming only an hour fires at zero seconds past zero minutes past
+                        that hour, every day, rather than sixty times a minute.
+
+                        Every field left out therefore means something specific:
+
+                          - second, minute, hour: omitted matches 0
+                          - dayOfMonth, month, dayOfWeek: omitted matches all
+                          - year: omitted matches all
+
+                        The bounds on each field are Temporal's own, checked by the Service in
+                        validateStructuredCalendar.
+                      properties:
+                        comment:
+                          description: |-
+                            comment describes what this calendar is for. Temporal stores it on the
+                            calendar and shows it in its UI.
+                          maxLength: 200
+                          type: string
+                        dayOfMonth:
+                          description: dayOfMonth ranges to match, 1-31. Omitted matches
+                            every day.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 31
+                          type: array
+                          x-kubernetes-validations:
+                          - message: dayOfMonth start must be between 1 and 31
+                            rule: self.all(r, r.start >= 1 && r.start <= 31)
+                          - message: dayOfMonth end must be between start and 31
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 31))
+                        dayOfWeek:
+                          description: |-
+                            dayOfWeek ranges to match, 0-6 where **0 is Sunday**. Omitted matches
+                            every day.
+
+                            Sunday being 0 is Temporal's numbering, taken from Go's time.Weekday, and
+                            is what the Service matches against.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 7
+                          type: array
+                          x-kubernetes-validations:
+                          - message: dayOfWeek start must be between 0 and 6, where
+                              0 is Sunday
+                            rule: self.all(r, r.start >= 0 && r.start <= 6)
+                          - message: dayOfWeek end must be between start and 6
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 6))
+                        hour:
+                          description: hour ranges to match, 0-23. Omitted matches
+                            hour 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 24
+                          type: array
+                          x-kubernetes-validations:
+                          - message: hour start must be between 0 and 23
+                            rule: self.all(r, r.start >= 0 && r.start <= 23)
+                          - message: hour end must be between start and 23
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 23))
+                        minute:
+                          description: minute ranges to match, 0-59. Omitted matches
+                            minute 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 60
+                          type: array
+                          x-kubernetes-validations:
+                          - message: minute start must be between 0 and 59
+                            rule: self.all(r, r.start >= 0 && r.start <= 59)
+                          - message: minute end must be between start and 59
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 59))
+                        month:
+                          description: |-
+                            month ranges to match, 1-12 where 1 is January. Omitted matches every
+                            month.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 12
+                          type: array
+                          x-kubernetes-validations:
+                          - message: month start must be between 1 and 12
+                            rule: self.all(r, r.start >= 1 && r.start <= 12)
+                          - message: month end must be between start and 12
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 12))
+                        second:
+                          description: second ranges to match, 0-59. Omitted matches
+                            second 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 60
+                          type: array
+                          x-kubernetes-validations:
+                          - message: second start must be between 0 and 59
+                            rule: self.all(r, r.start >= 0 && r.start <= 59)
+                          - message: second end must be between start and 59
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 59))
+                        year:
+                          description: |-
+                            year ranges to match, 2000-2100. Omitted matches every year, which is
+                            almost always what you want.
+
+                            The bounds are the Service's own minCalendarYear and maxCalendarYear.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 101
+                          type: array
+                          x-kubernetes-validations:
+                          - message: year start must be between 2000 and 2100
+                            rule: self.all(r, r.start >= 2000 && r.start <= 2100)
+                          - message: year end must be between start and 2100
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 2100))
+                      type: object
+                    maxItems: 50
+                    minItems: 1
+                    type: array
+                  cron:
+                    description: "cron holds cron expressions, for migrating a cron
+                      workflow to a schedule\nwithout rewriting its timing.\n\nTemporal
+                      accepts 5, 6 or 7 space-separated fields:\n\n\t5: minute hour
+                      dayOfMonth month dayOfWeek\n\t6: minute hour dayOfMonth month
+                      dayOfWeek year\n\t7: second minute hour dayOfMonth month dayOfWeek
+                      year\n\nThe shorthands @yearly, @monthly, @weekly, @daily and
+                      @hourly work, and so\ndoes \"@every <interval>[/<phase>]\",
+                      which Temporal compiles into an\ninterval rather than a calendar.
+                      A \"CRON_TZ=<zone>\" or \"TZ=<zone>\" prefix\nsets the time
+                      zone, in which case leave timeZone empty. A \"#\" comment may\nfollow
+                      the expression.\n\nNote that Temporal does *not* implement the
+                      special case some cron\nimplementations have of treating dayOfMonth
+                      and dayOfWeek as \"or\" rather\nthan \"and\" when both are set.\n\n**Temporal
+                      compiles cron away.** Once a schedule is created the Service\nstores
+                      these as calendars and intervals, and never reports them back
+                      as\ncron. That does not stop the operator noticing drift - see
+                      the Schedule\ndocumentation - but it does mean the Temporal
+                      UI will show a calendar\nwhere you wrote cron."
+                    items:
+                      maxLength: 1000
+                      minLength: 1
+                      type: string
+                    maxItems: 50
+                    minItems: 1
+                    type: array
+                  endAt:
+                    description: |-
+                      endAt drops every matching time after it, retiring the schedule without
+                      deleting it.
+                    format: date-time
+                    type: string
+                  excludeCalendars:
+                    description: |-
+                      excludeCalendars remove times the rest of the specification would have
+                      matched. Every field of an exclusion, seconds included, has to match a
+                      time for that time to be skipped.
+                    items:
+                      description: |-
+                        ScheduleCalendar matches times against the calendar, the way a cron expression
+                        does but written out in full.
+
+                        A time matches when at least one range of every field matches it. The
+                        defaults are Temporal's, and they are what make a calendar readable: a
+                        calendar naming only an hour fires at zero seconds past zero minutes past
+                        that hour, every day, rather than sixty times a minute.
+
+                        Every field left out therefore means something specific:
+
+                          - second, minute, hour: omitted matches 0
+                          - dayOfMonth, month, dayOfWeek: omitted matches all
+                          - year: omitted matches all
+
+                        The bounds on each field are Temporal's own, checked by the Service in
+                        validateStructuredCalendar.
+                      properties:
+                        comment:
+                          description: |-
+                            comment describes what this calendar is for. Temporal stores it on the
+                            calendar and shows it in its UI.
+                          maxLength: 200
+                          type: string
+                        dayOfMonth:
+                          description: dayOfMonth ranges to match, 1-31. Omitted matches
+                            every day.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 31
+                          type: array
+                          x-kubernetes-validations:
+                          - message: dayOfMonth start must be between 1 and 31
+                            rule: self.all(r, r.start >= 1 && r.start <= 31)
+                          - message: dayOfMonth end must be between start and 31
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 31))
+                        dayOfWeek:
+                          description: |-
+                            dayOfWeek ranges to match, 0-6 where **0 is Sunday**. Omitted matches
+                            every day.
+
+                            Sunday being 0 is Temporal's numbering, taken from Go's time.Weekday, and
+                            is what the Service matches against.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 7
+                          type: array
+                          x-kubernetes-validations:
+                          - message: dayOfWeek start must be between 0 and 6, where
+                              0 is Sunday
+                            rule: self.all(r, r.start >= 0 && r.start <= 6)
+                          - message: dayOfWeek end must be between start and 6
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 6))
+                        hour:
+                          description: hour ranges to match, 0-23. Omitted matches
+                            hour 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 24
+                          type: array
+                          x-kubernetes-validations:
+                          - message: hour start must be between 0 and 23
+                            rule: self.all(r, r.start >= 0 && r.start <= 23)
+                          - message: hour end must be between start and 23
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 23))
+                        minute:
+                          description: minute ranges to match, 0-59. Omitted matches
+                            minute 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 60
+                          type: array
+                          x-kubernetes-validations:
+                          - message: minute start must be between 0 and 59
+                            rule: self.all(r, r.start >= 0 && r.start <= 59)
+                          - message: minute end must be between start and 59
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 59))
+                        month:
+                          description: |-
+                            month ranges to match, 1-12 where 1 is January. Omitted matches every
+                            month.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 12
+                          type: array
+                          x-kubernetes-validations:
+                          - message: month start must be between 1 and 12
+                            rule: self.all(r, r.start >= 1 && r.start <= 12)
+                          - message: month end must be between start and 12
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 12))
+                        second:
+                          description: second ranges to match, 0-59. Omitted matches
+                            second 0.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 60
+                          type: array
+                          x-kubernetes-validations:
+                          - message: second start must be between 0 and 59
+                            rule: self.all(r, r.start >= 0 && r.start <= 59)
+                          - message: second end must be between start and 59
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 59))
+                        year:
+                          description: |-
+                            year ranges to match, 2000-2100. Omitted matches every year, which is
+                            almost always what you want.
+
+                            The bounds are the Service's own minCalendarYear and maxCalendarYear.
+                          items:
+                            description: |-
+                              ScheduleRange is a set of integer values a calendar field can match, written
+                              as a start, an optional inclusive end and an optional step.
+
+                              It is Temporal's own Range: "start" alone matches one value, and step counts
+                              from start. What the fields may hold depends on which calendar field the range
+                              belongs to, so the bounds are enforced on each field rather than here.
+                            properties:
+                              end:
+                                description: |-
+                                  end is the last value in the range, and is matched itself.
+
+                                  Omit it to match start alone. Temporal reads an end below start as equal
+                                  to start; this API asks for an end that is genuinely an end, so that a
+                                  range reading backwards is a mistake caught on the way in rather than
+                                  silently narrowed to one value.
+                                format: int32
+                                type: integer
+                              start:
+                                description: start is the first value in the range,
+                                  and is matched itself.
+                                format: int32
+                                type: integer
+                              step:
+                                description: |-
+                                  step is how far apart the matched values are within the range - 2 matches
+                                  every other value.
+
+                                  Omit it for every value, which is what Temporal does with a step of 0.
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            required:
+                            - start
+                            type: object
+                          maxItems: 101
+                          type: array
+                          x-kubernetes-validations:
+                          - message: year start must be between 2000 and 2100
+                            rule: self.all(r, r.start >= 2000 && r.start <= 2100)
+                          - message: year end must be between start and 2100
+                            rule: self.all(r, !has(r.end) || (r.end >= r.start &&
+                              r.end <= 2100))
+                      type: object
+                    maxItems: 50
+                    minItems: 1
+                    type: array
+                  intervals:
+                    description: intervals match times at a fixed period.
+                    items:
+                      description: |-
+                        ScheduleInterval matches times at a fixed period, counted from the Unix epoch
+                        rather than from when the schedule was created.
+
+                        The times are every `epoch + (n * every) + offset`. An `every` of 1h matches
+                        every hour on the hour; the same `every` with an `offset` of 19m matches every
+                        xx:19:00.
+                      properties:
+                        every:
+                          description: |-
+                            every is the period between matched times.
+
+                            Temporal refuses anything under one second. Written as a duration string,
+                            the same syntax spec.retention on a Namespace takes.
+                          maxLength: 20
+                          pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                          type: string
+                        offset:
+                          description: |-
+                            offset shifts every matched time later by a fixed amount.
+
+                            Temporal requires an offset shorter than the period - an offset of a whole
+                            period is the same as no offset, and the Service refuses it rather than
+                            accepting the ambiguity.
+                          maxLength: 20
+                          pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                          type: string
+                      required:
+                      - every
+                      type: object
+                    maxItems: 50
+                    minItems: 1
+                    type: array
+                  jitter:
+                    description: |-
+                      jitter spreads each action out by a random amount between zero and this
+                      duration, so that many schedules sharing a time do not all fire at once.
+
+                      Temporal caps the delay at the time until the next action, so jitter
+                      longer than the period between actions does not push an action past its
+                      successor.
+                    maxLength: 20
+                    pattern: ^[+-]?(0|(\d{1,4}d)?((\d{1,6}(\.\d{0,9})?|\.\d{1,9})(ns|us|µs|μs|ms|s|m|h))+|\d{1,4}d)$
+                    type: string
+                  startAt:
+                    description: |-
+                      startAt drops every matching time before it. Omitted, the schedule reaches
+                      back to the beginning of time - which matters only in combination with a
+                      catch-up window.
+                    format: date-time
+                    type: string
+                  timeZone:
+                    description: |-
+                      timeZone is the IANA time zone the calendars are interpreted in, such as
+                      "Europe/London". Defaults to UTC.
+
+                      The Temporal Service loads the zone from its own environment, so a zone
+                      this operator can resolve is not automatically one the Service can.
+
+                      Calendar matching is literal, with no special handling of daylight saving:
+                      a calendar firing at 02:30 in a zone that observes DST will not fire on
+                      the day that has no 02:30, and one firing at 01:30 will fire twice on the
+                      day that has two. Use UTC for a schedule that must be entirely
+                      self-contained.
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: at least one of calendars, intervals or cron is required
+                  rule: has(self.calendars) || has(self.intervals) || has(self.cron)
+              scheduleId:
+                description: |-
+                  scheduleId is the Temporal schedule's ID, exactly as Temporal knows it -
+                  "PaymentsNightly", not "payments-nightly".
+
+                  This is separate from the resource's own metadata.name because Kubernetes
+                  only accepts lowercase names for a resource, while schedule IDs are
+                  conventionally PascalCase. Nothing is derived from metadata.name.
+
+                  The length limit is Temporal's: the Service validates the ID with its
+                  internal "temporal-sys-scheduler:" prefix already attached against a limit
+                  that defaults to 1000 characters.
+                maxLength: 977
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: scheduleId is immutable
+                  rule: self == oldSelf
+              searchAttributes:
+                description: |-
+                  searchAttributes are indexed values attached to the schedule itself, so
+                  schedules can be found by them.
+
+                  This is the *schedule's* search attributes, not the workflow's - those are
+                  at spec.action.workflow.searchAttributes.
+                items:
+                  description: |-
+                    ScheduleSearchAttribute is one typed search attribute value.
+
+                    The type has to be stated because a search attribute's value cannot be
+                    interpreted without it: "2026-01-01" is a Datetime or a Keyword depending
+                    entirely on how the attribute was registered, and sending the wrong one is
+                    rejected by Temporal.
+                  properties:
+                    name:
+                      description: |-
+                        name is the search attribute's name, exactly as Temporal knows it -
+                        "CustomerId", not "customer-id". It must already be registered on the
+                        namespace, which is what a SearchAttribute resource is for.
+                      maxLength: 255
+                      minLength: 1
+                      type: string
+                    type:
+                      description: |-
+                        type is the type of the value, using the same names as a SearchAttribute
+                        resource and the Temporal CLI.
+                      enum:
+                      - Bool
+                      - Datetime
+                      - Double
+                      - Int
+                      - Keyword
+                      - KeywordList
+                      - Text
+                      type: string
+                    value:
+                      description: |-
+                        value is the value, written as JSON.
+
+                        What that means follows the type: a Bool takes "true", an Int takes "7", a
+                        Double takes "1.5", a Keyword or Text takes a quoted string like
+                        "\"gold\"", a Datetime takes a quoted RFC 3339 timestamp, and a
+                        KeywordList takes a JSON array of strings.
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  - type
+                  - value
+                  type: object
+                maxItems: 32
+                type: array
+              state:
+                description: |-
+                  state declares the parts of Temporal's own schedule state this resource
+                  manages. Each is managed only when present.
+                properties:
+                  limitedActions:
+                    description: |-
+                      limitedActions caps how many more times the schedule will act.
+
+                      Temporal decrements this after each action and stops acting at zero;
+                      actions skipped by the overlap policy do not count. A schedule with no
+                      remaining actions is deleted by Temporal after a few days.
+
+                      **This is a counter Temporal owns.** Declaring it means the operator will
+                      keep putting the declared number back as Temporal counts it down, which is
+                      almost never what anyone wants. It is here because a schedule that should
+                      run a fixed number of times cannot be expressed otherwise; leave it out
+                      unless that is what you mean.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  paused:
+                    description: |-
+                      paused decides whether the schedule is paused.
+
+                      **Omitted, pausing is not managed.** That is the point of the pointer: a
+                      person can pause a schedule to stop it while they investigate, and the
+                      operator will not undo that on its next resync. Temporal itself pauses
+                      schedules too, when pauseOnFailure fires.
+
+                      Set it and pausing becomes managed state like anything else: true keeps
+                      the schedule paused, false keeps it running, and a change made behind the
+                      operator's back is put back.
+                    type: boolean
+                type: object
+            required:
+            - action
+            - connectionRef
+            - namespaceRef
+            - schedule
+            - scheduleId
+            type: object
+          status:
+            description: status defines the observed state of Schedule
+            properties:
+              appliedSpecHash:
+                description: |-
+                  appliedSpecHash fingerprints the timing specification Temporal reported
+                  immediately after the operator last wrote it.
+
+                  Comparing this against what Temporal reports now answers the other half:
+                  "has anyone changed it on the Service since". Together the two mean the
+                  operator writes when something has actually changed, and stays quiet
+                  otherwise - rather than rewriting the schedule on every resync because
+                  cron cannot be compared.
+                type: string
+              conditions:
+                description: |-
+                  conditions represent the current state of the Schedule resource.
+
+                  Known condition types:
+                  - "Ready": the schedule exists on the referenced Temporal namespace and
+                    its declared configuration matches the spec
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              desiredSpecHash:
+                description: |-
+                  desiredSpecHash fingerprints the timing specification this resource last
+                  asked Temporal for.
+
+                  It exists because Temporal does not give back what it was given: cron
+                  expressions and the legacy calendar form are compiled into structured
+                  calendars on the way in, and the originals are discarded. There is
+                  therefore nothing on the Service to compare a cron expression against.
+
+                  Comparing this against the current spec answers "has the resource changed
+                  since we last wrote it", which is half of what drift detection needs.
+                type: string
+              observedGeneration:
+                description: |-
+                  observedGeneration is the metadata.generation of the Schedule that was
+                  last reconciled.
+                format: int64
+                type: integer
+              ownership:
+                description: |-
+                  ownership records whether the operator created the Temporal schedule or
+                  adopted one that already existed, and therefore whether deleting this
+                  resource removes it.
+
+                  "Creating" is a transient marker written immediately before creating a
+                  schedule; it settles to "Created" once creation is confirmed.
+                enum:
+                - Creating
+                - Created
+                - Adopted
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -24,6 +24,7 @@ rules:
   - connections/status
   - namespaces/status
   - nexusendpoints/status
+  - schedules/status
   - searchattributes/status
   verbs:
   - get
@@ -34,6 +35,7 @@ rules:
   resources:
   - namespaces
   - nexusendpoints
+  - schedules
   - searchattributes
   verbs:
   - get
@@ -46,6 +48,7 @@ rules:
   resources:
   - namespaces/finalizers
   - nexusendpoints/finalizers
+  - schedules/finalizers
   - searchattributes/finalizers
   verbs:
   - update

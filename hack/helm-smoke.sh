@@ -41,6 +41,7 @@ CRDS=(
   connections.temporal.simonemms.com
   namespaces.temporal.simonemms.com
   nexusendpoints.temporal.simonemms.com
+  schedules.temporal.simonemms.com
   searchattributes.temporal.simonemms.com
 )
 
@@ -76,7 +77,7 @@ log "Installing the chart as release ${CHART_RELEASE}"
   --wait \
   --timeout 5m
 
-log "Checking all four CRDs are installed"
+log "Checking every CRD is installed"
 for crd in "${CRDS[@]}"; do
   "${KUBECTL}" get crd "${crd}" -o name
 done

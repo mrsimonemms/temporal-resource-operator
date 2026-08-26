@@ -34,3 +34,6 @@ resources:
 - connection_admin_role.yaml
 - connection_editor_role.yaml
 - connection_viewer_role.yaml
+- schedule_admin_role.yaml
+- schedule_editor_role.yaml
+- schedule_viewer_role.yaml

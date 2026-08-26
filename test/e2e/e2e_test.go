@@ -1200,6 +1200,308 @@ spec:
 		})
 	})
 
+	Context("Schedule", func() {
+		var (
+			temporalNamespace string
+			resourceName      string
+			scheduleID        string
+		)
+
+		BeforeEach(func() {
+			suffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), CurrentSpecReport().LineNumber())
+			temporalNamespace = "e2e-sc-ns-" + suffix
+			resourceName = "payments-nightly-" + suffix
+			scheduleID = "PaymentsNightly" + strings.ReplaceAll(suffix, "-", "")
+
+			By("removing anything an earlier spec left behind")
+			clearSchedules()
+			clearOperatorResources()
+
+			cmd := exec.Command("kubectl", "wait", "--for=condition=Available",
+				"deployment/temporal", "-n", "temporal", "--timeout=5m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Temporal did not become available")
+		})
+
+		AfterEach(func() {
+			By("removing the Kubernetes resources")
+			clearSchedules()
+			clearOperatorResources()
+
+			By("removing anything left on the Temporal Service")
+			removeTemporalSchedule(temporalNamespace, scheduleID)
+			removeTemporalNamespace(temporalNamespace)
+		})
+
+		// readyNamespace gets a Temporal namespace to the point where the Service
+		// will actually accept a schedule in it.
+		readyNamespace := func() {
+			applyConnectionSample()
+			applyNamespace(temporalNamespace, "36h")
+
+			Eventually(func(g Gomega) {
+				g.Expect(namespaceReady(temporalNamespace)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			// The Service resolves a namespace through a registry that lags a
+			// few seconds behind a fresh registration, so a one-shot CLI call
+			// has to wait it out. The operator retries through it.
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(temporalCLI("schedule", "list", "-n", temporalNamespace, "-o", "json"))
+				g.Expect(err).NotTo(HaveOccurred(), "the namespace registry has not caught up yet")
+			}, 2*time.Minute).Should(Succeed())
+		}
+
+		It("should create a cron schedule and remove it again", func() {
+			readyNamespace()
+
+			Expect(resourceName).NotTo(Equal(scheduleID))
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n    timeZone: Europe/London\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+				g.Expect(scheduleReadyReason(resourceName)).To(Equal("Created"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(scheduleOwnership(resourceName)).To(Equal("Created"))
+
+			By("confirming the Service holds it under the Temporal ID")
+			described := describeTemporalSchedule(temporalNamespace, scheduleID)
+			Expect(described.Schedule.Action.StartWorkflow.WorkflowType.Name).To(Equal("ReconcilePayments"))
+			Expect(described.Schedule.Action.StartWorkflow.TaskQueue.Name).To(Equal("payments"))
+			Expect(described.Schedule.Spec.TimezoneName).To(Equal("Europe/London"))
+			Expect(temporalScheduleExists(temporalNamespace, resourceName)).To(BeFalse(),
+				"the Kubernetes resource name must never reach Temporal")
+
+			By("confirming the Service compiled the cron expression into a calendar")
+			// This is why the operator records hashes rather than comparing the
+			// spec: what it sent back is not what it was given.
+			Expect(described.Schedule.Spec.StructuredCalendar).NotTo(BeEmpty())
+			Expect(described.Schedule.Spec.StructuredCalendar[0].Hour[0].Start).To(Equal(2))
+			Expect(described.Schedule.Spec.StructuredCalendar[0].Minute[0].Start).To(Equal(30))
+
+			By("confirming a settled schedule is not rewritten when it is looked at again")
+			// The failure the two status fingerprints exist to prevent. Temporal
+			// compiled the cron expression away above, so an operator comparing
+			// the spec against what the Service reports would see drift here and
+			// rewrite the schedule for ever.
+			nudgeDependants()
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReadyReason(resourceName)).To(Equal("Reconciled"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("refusing to retarget the resource at a different schedule")
+			cmd := exec.Command("kubectl", "patch", "tsc", resourceName, "-n", "default",
+				"--type=merge", "-p", `{"spec":{"scheduleId":"SomethingElse"}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "spec.scheduleId must be immutable")
+			Expect(err.Error()).To(ContainSubstring("scheduleId is immutable"))
+
+			By("removing it again when the resource goes")
+			deleteScheduleResource(resourceName)
+
+			Eventually(func(g Gomega) {
+				g.Expect(temporalScheduleExists(temporalNamespace, scheduleID)).To(BeFalse())
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should reconcile a change to the timing and to the workflow", func() {
+			readyNamespace()
+
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("changing the timing to an interval")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    intervals:\n      - every: 6h\n        offset: 5h\n", "")
+
+			Eventually(func(g Gomega) {
+				described := describeTemporalSchedule(temporalNamespace, scheduleID)
+				g.Expect(described.Schedule.Spec.Interval).NotTo(BeEmpty())
+				g.Expect(described.Schedule.Spec.Interval[0].Interval).To(Equal("21600s"))
+				g.Expect(described.Schedule.Spec.StructuredCalendar).To(BeEmpty(),
+					"the old cron calendar must be replaced, not added to")
+			}, 3*time.Minute).Should(Succeed())
+
+			By("changing the workflow configuration and the policies")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    intervals:\n      - every: 6h\n        offset: 5h\n",
+				"  policies:\n    overlap: BufferAll\n")
+
+			Eventually(func(g Gomega) {
+				described := describeTemporalSchedule(temporalNamespace, scheduleID)
+				g.Expect(described.Schedule.Policies.OverlapPolicy).
+					To(Equal("SCHEDULE_OVERLAP_POLICY_BUFFER_ALL"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(scheduleOwnership(resourceName)).To(Equal("Created"))
+		})
+
+		It("should manage the paused state only while the spec declares it", func() {
+			readyNamespace()
+
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("leaving a schedule paused by hand alone while pausing is unmanaged")
+			// The CLI spells this "toggle --pause"; there is no "schedule pause".
+			_, err := utils.Run(temporalCLI("schedule", "toggle",
+				"-n", temporalNamespace, "--schedule-id", scheduleID,
+				"--pause", "--reason", "paused by hand"))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Wake the operator so it actually looks, then check that looking
+			// changed nothing.
+			nudgeDependants()
+
+			Consistently(func(g Gomega) {
+				g.Expect(describeTemporalSchedule(temporalNamespace, scheduleID).Schedule.State.Paused).
+					To(BeTrue(), "an unmanaged pause must not be undone")
+			}, 30*time.Second, 5*time.Second).Should(Succeed())
+
+			By("resuming it once the spec starts managing pausing")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n",
+				"  state:\n    paused: false\n")
+
+			Eventually(func(g Gomega) {
+				g.Expect(describeTemporalSchedule(temporalNamespace, scheduleID).Schedule.State.Paused).
+					To(BeFalse())
+			}, 3*time.Minute).Should(Succeed())
+
+			By("pausing it again when the spec says so")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n",
+				"  state:\n    paused: true\n")
+
+			Eventually(func(g Gomega) {
+				g.Expect(describeTemporalSchedule(temporalNamespace, scheduleID).Schedule.State.Paused).
+					To(BeTrue())
+			}, 3*time.Minute).Should(Succeed())
+		})
+
+		It("should adopt a schedule that already exists and leave it behind", func() {
+			readyNamespace()
+
+			By("creating a schedule outside the operator")
+			createTemporalSchedule(temporalNamespace, scheduleID)
+			Expect(temporalScheduleExists(temporalNamespace, scheduleID)).To(BeTrue())
+
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(scheduleOwnership(resourceName)).To(Equal("Adopted"))
+
+			By("reconciling the declared fields of the adopted schedule")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"@hourly\"\n", "")
+
+			Eventually(func(g Gomega) {
+				described := describeTemporalSchedule(temporalNamespace, scheduleID)
+				g.Expect(described.Schedule.Spec.StructuredCalendar).NotTo(BeEmpty())
+				g.Expect(described.Schedule.Spec.StructuredCalendar[0].Minute[0].Start).To(Equal(0))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(scheduleOwnership(resourceName)).To(Equal("Adopted"),
+				"configuring an adopted schedule must not make it the operator's to delete")
+
+			By("leaving it behind when the resource goes")
+			deleteScheduleResource(resourceName)
+
+			Expect(temporalScheduleExists(temporalNamespace, scheduleID)).To(BeTrue())
+		})
+
+		It("should leave a schedule behind under the Orphan policy", func() {
+			readyNamespace()
+
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"30 2 * * *\"\n",
+				"  deletionPolicy: Orphan\n")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(scheduleOwnership(resourceName)).To(Equal("Created"),
+				"the operator still created it; the policy only decides what happens next")
+
+			By("deleting the resource")
+			deleteScheduleResource(resourceName)
+
+			Expect(temporalScheduleExists(temporalNamespace, scheduleID)).To(BeTrue(),
+				"Orphan must leave the schedule running")
+		})
+
+		It("should refuse an invalid schedule at the API server", func() {
+			// The admission rules, proven against the real API server in the
+			// cluster rather than envtest. A schedule Kubernetes will not store
+			// never reaches the operator at all.
+			manifest := `apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  name: ` + resourceName + `
+spec:
+  scheduleId: ` + scheduleID + `
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: ` + temporalNamespace + `
+  schedule:
+    timeZone: UTC
+  action:
+    workflow:
+      type: ReconcilePayments
+      taskQueue: payments
+`
+
+			cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "a schedule with no timing rules must be refused")
+			Expect(err.Error()).To(ContainSubstring("at least one of calendars, intervals or cron"))
+		})
+
+		It("should report an invalid cron expression without touching Temporal", func() {
+			// The CRD cannot parse cron, so this one is caught by the Go
+			// validation phase - before the operator dials anything.
+			readyNamespace()
+
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"not a cron expression\"\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReadyReason(resourceName)).To(Equal("InvalidSchedule"))
+				g.Expect(scheduleReady(resourceName)).To(Equal("False"))
+			}, 3*time.Minute).Should(Succeed())
+
+			Expect(temporalScheduleExists(temporalNamespace, scheduleID)).To(BeFalse(),
+				"an invalid schedule must never reach the Service")
+
+			By("recovering once the expression is fixed")
+			applySchedule(resourceName, scheduleID, temporalNamespace,
+				"    cron:\n      - \"@daily\"\n", "")
+
+			Eventually(func(g Gomega) {
+				g.Expect(scheduleReady(resourceName)).To(Equal("True"))
+			}, 3*time.Minute).Should(Succeed())
+		})
+	})
+
 	Context("NexusEndpoint", func() {
 		var (
 			temporalNamespace string
@@ -2094,6 +2396,186 @@ func describeTemporalNamespace(name string) temporalNamespaceDescription {
 	Expect(json.Unmarshal([]byte(output), &described)).To(Succeed(), "Failed to parse the description")
 
 	return described
+}
+
+// nudgeDependants forces the operator to reconcile everything depending on the
+// sample Connection, without changing any of it.
+//
+// A settled resource is otherwise only looked at again on its five-minute
+// resync, which is far too long for a spec to wait. The Schedule controller
+// watches Connection unfiltered - readiness lives in status, so a generation
+// predicate would discard the events that matter - so annotating the Connection
+// produces an event that enqueues every dependant immediately.
+func nudgeDependants() {
+	cmd := exec.Command("kubectl", "annotate", "connection", "connection-sample",
+		"-n", "default", "e2e.temporal.simonemms.com/nudge="+fmt.Sprint(time.Now().UnixNano()),
+		"--overwrite")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to nudge the Connection")
+}
+
+// applySchedule applies a Schedule. resourceName is the Kubernetes resource's
+// name and scheduleID is what Temporal is asked for - deliberately different,
+// because that is the distinction the API exists to draw. timing is the body of
+// spec.schedule, indented to sit under it.
+func applySchedule(resourceName, scheduleID, namespaceRef, timing, extra string) {
+	manifest := `apiVersion: temporal.simonemms.com/v1beta1
+kind: Schedule
+metadata:
+  name: ` + resourceName + `
+spec:
+  scheduleId: ` + scheduleID + `
+  connectionRef:
+    name: connection-sample
+  namespaceRef:
+    name: ` + namespaceRef + `
+  schedule:
+` + timing + `  action:
+    workflow:
+      type: ReconcilePayments
+      taskQueue: payments
+`
+	manifest += extra
+
+	cmd := exec.Command("kubectl", "apply", "-n", "default", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply the Schedule")
+}
+
+// deleteScheduleResource removes a Schedule and waits for it to go, so that a
+// spec asserting on what happened afterwards is not racing the finalizer.
+func deleteScheduleResource(resourceName string) {
+	cmd := exec.Command("kubectl", "delete", "schedule.temporal.simonemms.com", resourceName,
+		"-n", "default", "--wait=true", "--timeout=3m")
+
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to delete the Schedule")
+}
+
+// clearSchedules removes every Schedule from the test namespace, stripping
+// finalizers from anything that will not go quietly so one wedged resource
+// cannot poison every following spec.
+func clearSchedules() {
+	cmd := exec.Command("kubectl", "delete", "schedule.temporal.simonemms.com",
+		"--all", "-n", "default", "--wait=true", "--timeout=3m")
+	if _, err := utils.Run(cmd); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Schedule cleanup did not complete, stripping finalizers: %s\n", err)
+
+		cmd = exec.Command("kubectl", "patch", "schedule.temporal.simonemms.com", "--all",
+			"-n", "default", "--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+		_, _ = utils.Run(cmd)
+	}
+}
+
+// scheduleField reads one field from a Schedule with a JSONPath expression.
+func scheduleField(resourceName, jsonpath string) string {
+	cmd := exec.Command("kubectl", "get", "tsc", resourceName, "-n", "default", "-o", "jsonpath="+jsonpath)
+
+	output, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+
+	return strings.TrimSpace(output)
+}
+
+// scheduleReady returns the status of the named Schedule's Ready condition.
+func scheduleReady(resourceName string) string {
+	return scheduleField(resourceName, "{.status.conditions[?(@.type=='Ready')].status}")
+}
+
+// scheduleReadyReason returns the reason on the named Schedule's Ready condition.
+func scheduleReadyReason(resourceName string) string {
+	return scheduleField(resourceName, "{.status.conditions[?(@.type=='Ready')].reason}")
+}
+
+// scheduleOwnership returns the persisted ownership of the named Schedule.
+func scheduleOwnership(resourceName string) string {
+	return scheduleField(resourceName, "{.status.ownership}")
+}
+
+// temporalScheduleDescription is the part of `temporal schedule describe -o json`
+// output the e2e specs assert on.
+type temporalScheduleDescription struct {
+	Schedule struct {
+		Spec struct {
+			StructuredCalendar []struct {
+				Hour []struct {
+					Start int `json:"start"`
+				} `json:"hour"`
+				Minute []struct {
+					Start int `json:"start"`
+				} `json:"minute"`
+			} `json:"structuredCalendar"`
+			Interval []struct {
+				Interval string `json:"interval"`
+			} `json:"interval"`
+			TimezoneName string `json:"timezoneName"`
+		} `json:"spec"`
+		Action struct {
+			StartWorkflow struct {
+				WorkflowType struct {
+					Name string `json:"name"`
+				} `json:"workflowType"`
+				TaskQueue struct {
+					Name string `json:"name"`
+				} `json:"taskQueue"`
+			} `json:"startWorkflow"`
+		} `json:"action"`
+		Policies struct {
+			OverlapPolicy string `json:"overlapPolicy"`
+		} `json:"policies"`
+		State struct {
+			Paused bool   `json:"paused"`
+			Notes  string `json:"notes"`
+		} `json:"state"`
+	} `json:"schedule"`
+}
+
+// describeTemporalSchedule asks the Temporal Service itself about a schedule.
+func describeTemporalSchedule(temporalNamespace, scheduleID string) temporalScheduleDescription {
+	output, err := utils.Run(temporalCLI("schedule", "describe",
+		"-n", temporalNamespace, "--schedule-id", scheduleID, "-o", "json"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to describe the Temporal schedule")
+
+	var described temporalScheduleDescription
+	Expect(json.Unmarshal([]byte(output), &described)).To(Succeed(), "Failed to parse the description")
+
+	return described
+}
+
+// temporalScheduleExists reports whether the Temporal Service still knows about
+// a schedule.
+func temporalScheduleExists(temporalNamespace, scheduleID string) bool {
+	_, err := utils.Run(temporalCLI("schedule", "describe",
+		"-n", temporalNamespace, "--schedule-id", scheduleID, "-o", "json"))
+
+	return err == nil
+}
+
+// createTemporalSchedule creates a schedule with the Temporal CLI, standing in
+// for one that existed before the operator did.
+func createTemporalSchedule(temporalNamespace, scheduleID string) {
+	// The CLI spells the workflow type "--type", not "--workflow-type".
+	_, err := utils.Run(temporalCLI("schedule", "create",
+		"-n", temporalNamespace, "--schedule-id", scheduleID,
+		"--cron", "30 2 * * *",
+		"--workflow-id", "adopted-"+scheduleID,
+		"--type", "ReconcilePayments",
+		"--task-queue", "payments"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the Temporal schedule")
+}
+
+// removeTemporalSchedule deletes a schedule if it is still there, so that a
+// reused cluster stays predictable.
+func removeTemporalSchedule(temporalNamespace, scheduleID string) {
+	if !temporalScheduleExists(temporalNamespace, scheduleID) {
+		return
+	}
+
+	_, _ = utils.Run(temporalCLI("schedule", "delete",
+		"-n", temporalNamespace, "--schedule-id", scheduleID))
 }
 
 // temporalCLI builds a kubectl exec running the Temporal CLI inside the Temporal
